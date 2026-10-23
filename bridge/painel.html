@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel Solaris</title>
+<style>
+:root {
+  --bg: #f6f6f3; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+  --accent: #d9731a; --steps: #2f7d5b; --hr: #c8413b; --ok: #2f7d5b; --err: #b3261e;
+  --deep: #2d3f8f; --light: #6f8fe0; --rem: #a46ad8; --awake: #e8a33d;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413; --card: #1e1e1c; --ink: #ecebe6; --muted: #9b9a93; --line: #33322e;
+    --accent: #f0913a; --steps: #4fb487; --hr: #ef6a62; --ok: #4fb487; --err: #f2847b;
+    --deep: #5b70d6; --light: #8eaaf2; --rem: #bf8cf0; --awake: #f0b85c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141413; --card: #1e1e1c; --ink: #ecebe6; --muted: #9b9a93; --line: #33322e;
+  --accent: #f0913a; --steps: #4fb487; --hr: #ef6a62; --ok: #4fb487; --err: #f2847b;
+  --deep: #5b70d6; --light: #8eaaf2; --rem: #bf8cf0; --awake: #f0b85c;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h1 small { font-weight: 400; color: var(--muted); font-size: 14px; margin-left: 6px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+.bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-weight: 600; }
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button:disabled { opacity: .55; cursor: wait; }
+select, input, textarea { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; }
+select { width: auto; }
+#status { font-size: 13px; color: var(--muted); min-height: 1.4em; margin: -6px 0 14px; }
+#status.err { color: var(--err); }
+#status.ok { color: var(--ok); }
+.grid { display: grid; gap: 14px; }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px; }
+.two { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+.kpi .v { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.kpi .v span { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+.kpi .s { font-size: 13px; color: var(--muted); }
+.section { margin-bottom: 14px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; }
+.chart .grid-l { stroke: var(--line); }
+.chart .ax { fill: var(--muted); font-size: 11px; }
+.chart .guide { stroke: var(--muted); stroke-dasharray: 3 3; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 12px; padding: 4px 8px;
+  border-radius: 6px; white-space: nowrap; transform: translate(-50%, -110%); display: none; }
+.empty { color: var(--muted); font-size: 14px; padding: 18px 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.night + .night { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+.night-h { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; font-size: 14px; margin-bottom: 6px; }
+.night-h b { font-variant-numeric: tabular-nums; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+td.k { color: var(--muted); width: 40%; }
+td code { font-size: 12px; word-break: break-all; }
+.scroll { overflow-x: auto; }
+form { display: grid; gap: 10px; }
+label { font-size: 13px; color: var(--muted); display: grid; gap: 4px; }
+textarea { min-height: 72px; resize: vertical; }
+.count { font-size: 12px; color: var(--muted); text-align: right; }
+.row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+.note { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details pre { font-size: 12px; overflow: auto; max-height: 360px; background: var(--bg); padding: 10px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Solaris <small id="sub">Haylou Solar Ultra</small></h1>
+    <div class="bar">
+      <select id="dias" aria-label="Período">
+        <option value="1">Hoje (desde ontem 18h)</option>
+        <option value="3">Últimos 3 dias</option>
+        <option value="7">Últimos 7 dias</option>
+      </select>
+      <button id="ler">Ler o relógio</button>
+      <button class="ghost" id="tema" title="Alternar tema">◐</button>
+    </div>
+  </header>
+  <div id="status"></div>
+
+  <div class="grid kpis">
+    <div class="card kpi"><h2>Bateria</h2><div class="v" id="k-bat">–</div><div class="s" id="k-bat-s">&nbsp;</div></div>
+    <div class="card kpi"><h2>Passos hoje</h2><div class="v" id="k-passos">–</div><div class="s" id="k-passos-s">&nbsp;</div></div>
+    <div class="card kpi"><h2>Batimento</h2><div class="v" id="k-bpm">–</div><div class="s" id="k-bpm-s">&nbsp;</div></div>
+    <div class="card kpi"><h2>Última noite</h2><div class="v" id="k-sono">–</div><div class="s" id="k-sono-s">&nbsp;</div></div>
+  </div>
+
+  <div class="card section">
+    <h2>Passos por hora</h2>
+    <div class="chart" id="c-passos"></div>
+  </div>
+
+  <div class="card section">
+    <h2>Batimentos</h2>
+    <div class="chart" id="c-bpm"></div>
+  </div>
+
+  <div class="card section">
+    <h2>Sono</h2>
+    <div id="c-sono"></div>
+    <div class="legend">
+      <span><i style="background:var(--awake)"></i>acordado</span>
+      <span><i style="background:var(--rem)"></i>REM</span>
+      <span><i style="background:var(--light)"></i>leve</span>
+      <span><i style="background:var(--deep)"></i>profundo</span>
+    </div>
+  </div>
+
+  <div class="card section">
+    <h2>Resumo por dia</h2>
+    <div class="scroll" id="t-dias"><div class="empty">Sem dados ainda.</div></div>
+  </div>
+
+  <div class="grid two section">
+    <div class="card">
+      <h2>Enviar notificação</h2>
+      <form id="f-notif">
+        <label>Título <input name="titulo" maxlength="90" required placeholder="Pedido #123"></label>
+        <label>Mensagem <textarea name="mensagem" maxlength="357" required placeholder="Novo pedido de R$ 250,00"></textarea></label>
+        <div class="count" id="count">0 / 357 bytes</div>
+        <div class="row">
+          <label>Ícone <select name="tipo" id="tipo"></select></label>
+          <button type="submit">Enviar ao relógio</button>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Medição de batimentos</h2>
+      <div class="row">
+        <label>Intervalo automático <select id="intervalo"></select></label>
+        <button id="aplicar">Aplicar</button>
+      </div>
+      <p class="note">Atual no relógio: <b id="int-atual">–</b>. O app oficial usa 10 min; 3 min foi testado e funciona, mas gasta mais bateria.</p>
+    </div>
+  </div>
+
+  <div class="card section">
+    <h2>Aparelho</h2>
+    <div class="scroll" id="t-aparelho"><div class="empty">Sem dados ainda.</div></div>
+    <details style="margin-top:12px"><summary>Dados brutos (JSON)</summary><pre id="raw"></pre></details>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const date = t => new Date(t * 1000);
+const fmtH = t => { const d = date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtD = t => { const d = date(t); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}`; };
+const fmtDH = t => `${fmtD(t)} ${fmtH(t)}`;
+const dur = s => `${Math.floor(s / 3600)}h${pad(Math.floor(s % 3600 / 60))}`;
+const num = n => n.toLocaleString('pt-BR');
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const dayKey = t => { const d = date(t); d.setHours(0, 0, 0, 0); return d / 1000; };
+const STAGES = { 2: ['acordado', '--awake'], 5: ['REM', '--rem'], 1: ['leve', '--light'], 0: ['profundo', '--deep'] };
+const LANES = [2, 5, 1, 0];
+const SLEEP_LABELS = { 16: 'entrou', 17: 'saiu' };
+
+let data = null;
+
+function setStatus(msg, kind = '') { const el = $('#status'); el.textContent = msg; el.className = kind; }
+
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  if (!res.ok) throw new Error((await res.text()) || `Erro ${res.status}`);
+  return res.json();
+}
+
+function busy(on) { document.querySelectorAll('button:not(.ghost)').forEach(b => b.disabled = on); }
+
+async function run(msg, fn) {
+  busy(true); setStatus(msg);
+  try { await fn(); } catch (e) { setStatus(e.message, 'err'); } finally { busy(false); }
+}
+
+function nice(v) {
+  if (v <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(v));
+  return [1, 2, 2.5, 5, 10].find(m => m * p >= v) * p;
+}
+
+/* Gráfico de tempo genérico: eixo x em horas locais, eixo y opcional, dica ao passar o mouse. */
+function chart(el, o) {
+  const W = el.clientWidth || 600, H = o.h, L = o.left ?? 40, R = 8, T = 10, B = 22;
+  const w = W - L - R, h = H - T - B, span = Math.max(1, o.t1 - o.t0);
+  const yMin = o.yMin ?? 0, yMax = o.yMax ?? 1;
+  const x = t => L + (t - o.t0) / span * w;
+  const y = v => T + h - (v - yMin) / (yMax - yMin) * h;
+  let s = '';
+  for (const v of o.yTicks || [])
+    s += `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${num(v)}</text>`;
+  const stepH = [1, 2, 3, 6, 12, 24, 48].find(sh => span / (sh * 3600) <= w / 64) || 48;
+  const d = date(o.t0); d.setMinutes(0, 0, 0);
+  while (d.getHours() % Math.min(stepH, 24)) d.setHours(d.getHours() + 1);
+  for (; d / 1000 <= o.t1; d.setHours(d.getHours() + stepH)) {
+    const t = d / 1000; if (t < o.t0) continue;
+    s += `<text class="ax" x="${x(t)}" y="${H - 6}" text-anchor="middle">${d.getHours() === 0 || stepH >= 24 ? fmtD(t) : fmtH(t)}</text>`;
+  }
+  s += o.body({ x, y, T, h, L, W, R });
+  el.innerHTML = `<svg width="${W}" height="${H}">${s}<line class="guide" y1="${T}" y2="${T + h}" style="display:none"/></svg><div class="tip"></div>`;
+  if (!o.hover) return;
+  const svg = el.querySelector('svg'), tip = el.querySelector('.tip'), guide = el.querySelector('.guide');
+  svg.addEventListener('mousemove', e => {
+    const px = e.clientX - svg.getBoundingClientRect().left;
+    const hit = px >= L && px <= W - R ? o.hover(o.t0 + (px - L) / w * span) : null;
+    if (!hit) { tip.style.display = guide.style.display = 'none'; return; }
+    const gx = x(hit.t);
+    guide.setAttribute('x1', gx); guide.setAttribute('x2', gx); guide.style.display = '';
+    tip.innerHTML = hit.html; tip.style.display = 'block';
+    tip.style.left = Math.min(Math.max(gx, 70), W - 70) + 'px'; tip.style.top = (hit.y ?? T) + 'px';
+  });
+  svg.addEventListener('mouseleave', () => { tip.style.display = guide.style.display = 'none'; });
+}
+
+function empty(el, msg) { el.innerHTML = `<div class="empty">${msg}</div>`; }
+
+function drawSteps() {
+  const el = $('#c-passos');
+  const buckets = new Map();
+  for (const p of data.passos) {
+    const hs = Math.floor(p.t / 3600) * 3600;
+    const b = buckets.get(hs) || { passos: 0, kcal: 0, metros: 0 };
+    b.passos += p.passos; b.kcal += p.kcal; b.metros += p.metros; buckets.set(hs, b);
+  }
+  if (!buckets.size) return empty(el, 'Sem passos registrados no período.');
+  const max = nice(Math.max(...[...buckets.values()].map(b => b.passos)));
+  chart(el, {
+    t0: data.inicio, t1: data.fim, h: 200, yMax: max, yTicks: [0, max / 2, max],
+    body: ({ x, y }) => [...buckets].map(([hs, b]) => {
+      const x0 = x(hs), bw = Math.max(1, x(hs + 3600) - x0 - 2);
+      return `<rect x="${x0 + 1}" y="${y(b.passos)}" width="${bw}" height="${y(0) - y(b.passos)}" rx="2" fill="${css('--steps')}"/>`;
+    }).join(''),
+    hover: t => {
+      const hs = Math.floor(t / 3600) * 3600, b = buckets.get(hs);
+      return b && { t: hs + 1800, html: `${fmtDH(hs)}–${fmtH(hs + 3600)} · <b>${num(b.passos)}</b> passos · ${b.kcal.toFixed(0)} kcal · ${(b.metros / 1000).toFixed(2)} km` };
+    },
+  });
+}
+
+function drawHr() {
+  const el = $('#c-bpm'), pts = data.batimentos;
+  if (!pts.length) return empty(el, 'Sem batimentos registrados no período.');
+  const vals = pts.map(p => p[1]);
+  const yMin = Math.max(0, Math.floor((Math.min(...vals) - 10) / 10) * 10), yMax = Math.ceil((Math.max(...vals) + 10) / 10) * 10;
+  const mid = Math.round((yMin + yMax) / 20) * 10;
+  chart(el, {
+    t0: data.inicio, t1: data.fim, h: 200, yMin, yMax, yTicks: [yMin, mid, yMax],
+    body: ({ x, y }) => {
+      let paths = [], cur = [];
+      pts.forEach((p, i) => {
+        if (i && p[0] - pts[i - 1][0] > 45 * 60) { paths.push(cur); cur = []; }
+        cur.push(`${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`);
+      });
+      paths.push(cur);
+      const c = css('--hr');
+      return paths.map(seg => seg.length > 1
+        ? `<polyline points="${seg.join(' ')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`
+        : `<circle cx="${seg[0].split(',')[0]}" cy="${seg[0].split(',')[1]}" r="2.5" fill="${c}"/>`).join('');
+    },
+    hover: t => {
+      let best = null;
+      for (const p of pts) if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+      if (!best || Math.abs(best[0] - t) > 40 * 60) return null;
+      return { t: best[0], html: `${fmtDH(best[0])} · <b>${best[1]}</b> bpm` };
+    },
+  });
+}
+
+/* Divide os pontos de sono em noites (intervalo > 6 h começa outra) e cada noite em trechos por estágio. */
+function nights() {
+  const groups = [];
+  data.sono.forEach((p, i) => {
+    if (!i || p[0] - data.sono[i - 1][0] > 6 * 3600) groups.push([]);
+    groups.at(-1).push(p);
+  });
+  return groups.map(pts => {
+    const segs = [], totals = { 0: 0, 1: 0, 2: 0, 5: 0 };
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [t, s] = pts[i], t2 = pts[i + 1][0];
+      if (s in totals) { segs.push({ t, t2, s }); totals[s] += t2 - t; }
+    }
+    const asleep = totals[0] + totals[1] + totals[5];
+    return { t0: pts[0][0], t1: pts.at(-1)[0], segs, totals, asleep };
+  }).filter(n => n.segs.length);
+}
+
+function drawSleep() {
+  const box = $('#c-sono'), list = nights().reverse();
+  if (!list.length) return empty(box, 'Sem sono registrado no período.');
+  box.innerHTML = list.map((n, i) => `<div class="night">
+    <div class="night-h"><span>${fmtDH(n.t0)} → ${fmtDH(n.t1)}</span>
+    <span>dormindo <b>${dur(n.asleep)}</b> · profundo ${dur(n.totals[0])} · leve ${dur(n.totals[1])} · REM ${dur(n.totals[5])} · acordado ${dur(n.totals[2])}</span></div>
+    <div class="chart" id="night-${i}"></div></div>`).join('');
+  list.forEach((n, i) => {
+    const lane = 26;
+    chart($(`#night-${i}`), {
+      t0: n.t0, t1: n.t1, h: lane * 4 + 32, left: 72,
+      body: ({ x, T, L }) => LANES.map((s, li) => `<text class="ax" x="${L - 8}" y="${T + li * lane + lane / 2 + 4}" text-anchor="end">${STAGES[s][0]}</text>`).join('')
+        + n.segs.map(g => {
+          const li = LANES.indexOf(g.s);
+          return `<rect x="${x(g.t)}" y="${T + li * lane + 3}" width="${Math.max(1, x(g.t2) - x(g.t))}" height="${lane - 6}" rx="3" fill="${css(STAGES[g.s][1])}"/>`;
+        }).join(''),
+      hover: t => {
+        const g = n.segs.find(g => t >= g.t && t < g.t2);
+        return g && { t, y: 10 + LANES.indexOf(g.s) * lane, html: `<b>${STAGES[g.s][0]}</b> · ${fmtH(g.t)}–${fmtH(g.t2)} (${dur(g.t2 - g.t)})` };
+      },
+    });
+  });
+}
+
+function drawDays() {
+  const days = new Map();
+  const get = t => { const k = dayKey(t); if (!days.has(k)) days.set(k, { passos: 0, kcal: 0, metros: 0, bpm: [] }); return days.get(k); };
+  for (const p of data.passos) { const d = get(p.t); d.passos += p.passos; d.kcal += p.kcal; d.metros += p.metros; }
+  for (const [t, b] of data.batimentos) get(t).bpm.push(b);
+  const sleepByDay = new Map(nights().map(n => [dayKey(n.t1), n.asleep]));
+  if (!days.size) return empty($('#t-dias'), 'Sem dados no período.');
+  const rows = [...days].sort((a, b) => b[0] - a[0]).map(([k, d]) => {
+    const bpm = d.bpm.length ? `${Math.min(...d.bpm)} / ${Math.round(d.bpm.reduce((a, b) => a + b, 0) / d.bpm.length)} / ${Math.max(...d.bpm)}` : '–';
+    const sl = sleepByDay.get(k);
+    return `<tr><td>${fmtD(k)}</td><td>${num(d.passos)}</td><td>${d.kcal.toFixed(0)}</td><td>${(d.metros / 1000).toFixed(2)}</td><td>${bpm}</td><td>${d.bpm.length}</td><td>${sl ? dur(sl) : '–'}</td></tr>`;
+  });
+  $('#t-dias').innerHTML = `<table><thead><tr><th>Dia</th><th>Passos</th><th>kcal</th><th>km</th><th>bpm mín / méd / máx</th><th>Medições</th><th>Sono (noite que terminou no dia)</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function drawKpis() {
+  const b = data.bateria;
+  $('#k-bat').innerHTML = b ? `${b.nivel}<span>%</span>` : '–';
+  $('#k-bat-s').textContent = b ? [b.carregando ? 'carregando' : 'na bateria', b.economia ? 'modo economia' : ''].filter(Boolean).join(' · ') : 'sem resposta';
+
+  const today = dayKey(Date.now() / 1000), todays = data.passos.filter(p => p.t >= today);
+  const steps = todays.reduce((a, p) => a + p.passos, 0);
+  $('#k-passos').textContent = num(steps);
+  $('#k-passos-s').textContent = `${todays.reduce((a, p) => a + p.kcal, 0).toFixed(0)} kcal · ${(todays.reduce((a, p) => a + p.metros, 0) / 1000).toFixed(2)} km`;
+
+  const hr = data.batimentos;
+  if (hr.length) {
+    const v = hr.map(p => p[1]), last = hr.at(-1);
+    $('#k-bpm').innerHTML = `${last[1]}<span>bpm</span>`;
+    $('#k-bpm-s').textContent = `às ${fmtH(last[0])} · período ${Math.min(...v)}–${Math.max(...v)}, média ${Math.round(v.reduce((a, b) => a + b, 0) / v.length)}`;
+  } else { $('#k-bpm').textContent = '–'; $('#k-bpm-s').textContent = 'sem medições'; }
+
+  const n = nights().at(-1);
+  if (n) { $('#k-sono').textContent = dur(n.asleep); $('#k-sono-s').textContent = `${fmtH(n.t0)} → ${fmtH(n.t1)} · profundo ${dur(n.totals[0])}`; }
+  else { $('#k-sono').textContent = '–'; $('#k-sono-s').textContent = 'sem registro'; }
+
+  $('#int-atual').textContent = data.intervalo_bpm == null ? '–' : data.intervalo_bpm === 0 ? 'desligado' : `${data.intervalo_bpm} min`;
+  if (data.intervalo_bpm != null) $('#intervalo').value = data.intervalo_bpm;
+}
+
+function drawDevice() {
+  const a = data.aparelho || {};
+  const rows = [['nome', data.nome], ['endereço BLE', data.endereco], ...Object.entries(a)]
+    .filter(([, v]) => v != null && v !== '')
+    .map(([k, v]) => `<tr><td class="k">${k}</td><td>${/^[0-9a-f]{2}( [0-9a-f]{2})+$/.test(v) ? `<code>${v}</code>` : v}</td></tr>`);
+  $('#t-aparelho').innerHTML = `<table><tbody>${rows.join('')}</tbody></table>`;
+  $('#raw').textContent = JSON.stringify(data, null, 2);
+  $('#sub').textContent = `${data.nome || 'Haylou Solar Ultra'} · lido ${fmtDH(data.lido_em)}`;
+}
+
+function render() {
+  if (!data) return;
+  $('#dias').value = data.dias;
+  drawKpis(); drawSteps(); drawHr(); drawSleep(); drawDays(); drawDevice();
+}
+
+async function read() {
+  await run('Lendo o relógio… (leva uns 10–30 s; o Bluetooth do celular precisa estar desligado)', async () => {
+    data = await api(`/api/dados?dias=${$('#dias').value}`);
+    render();
+    setStatus(`Leitura concluída às ${fmtH(data.lido_em)}: ${data.passos.length} registros de passos, ${data.batimentos.length} batimentos, ${data.sono.length} pontos de sono.`, 'ok');
+  });
+}
+
+$('#ler').onclick = read;
+$('#dias').onchange = read;
+
+const form = $('#f-notif');
+const updateCount = () => { $('#count').textContent = `${new TextEncoder().encode(form.mensagem.value).length} / 357 bytes`; };
+form.mensagem.addEventListener('input', updateCount);
+form.onsubmit = e => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(form));
+  run('Enviando notificação…', async () => {
+    await api('/api/notificar', body);
+    setStatus(`Notificação "${body.titulo}" entregue ao relógio.`, 'ok');
+  });
+};
+
+$('#aplicar').onclick = () => {
+  const minutos = Number($('#intervalo').value);
+  run('Alterando o intervalo de medição…', async () => {
+    const r = await api('/api/intervalo', { minutos });
+    if (data) data.intervalo_bpm = r.intervalo_bpm; else $('#int-atual').textContent = `${r.intervalo_bpm} min`;
+    render();
+    setStatus(`Intervalo de batimentos agora: ${r.intervalo_bpm === 0 ? 'desligado' : r.intervalo_bpm + ' min'}.`, 'ok');
+  });
+};
+
+$('#tema').onclick = () => {
+  const root = document.documentElement, dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const cur = root.dataset.theme || (dark ? 'dark' : 'light');
+  root.dataset.theme = cur === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem('solaris-tema', root.dataset.theme); } catch {}
+  render();
+};
+try { const t = localStorage.getItem('solaris-tema'); if (t) document.documentElement.dataset.theme = t; } catch {}
+
+let resizeT;
+addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(render, 150); });
+
+(async () => {
+  try {
+    const cfg = await api('/api/config');
+    $('#tipo').innerHTML = cfg.tipos.map(t => `<option ${t === 'sms' ? 'selected' : ''}>${t}</option>`).join('');
+    $('#intervalo').innerHTML = cfg.intervalos.map(m => `<option value="${m}">${m === 0 ? 'desligado' : m + ' min'}</option>`).join('');
+    if (cfg.ultimo) { data = cfg.ultimo; render(); setStatus(`Mostrando a última leitura (${fmtDH(data.lido_em)}).`); }
+    else read();
+  } catch (e) { setStatus(`Servidor do painel não respondeu: ${e.message}`, 'err'); }
+})();
+</script>
+</body>
+</html>

@@ -24,6 +24,7 @@ Solaris/
 | Histórico de passos, batimentos e sono | `bridge/solaris_read.py --days N` |
 | Notificação personalizada (título + texto, com acentos) | `bridge/solaris_notify.py` |
 | Intervalo de medição de batimentos (testado em 3 min) | ver `protocol/PROTOCOLO.md` |
+| Painel no navegador: tudo acima com gráficos, notificação e intervalo | `bridge/solaris_panel.py` |
 
 ## Como rodar
 
@@ -38,6 +39,7 @@ cd bridge
 uv run solaris_read.py --scan
 uv run solaris_read.py
 uv run solaris_notify.py "Título" "Mensagem" --tipo whatsapp
+uv run solaris_panel.py          # painel em http://localhost:8765
 ```
 
 ## Roteiro

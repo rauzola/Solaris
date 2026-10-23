@@ -133,8 +133,35 @@ def decode_points(packets: list[bytes]) -> list[dict]:
     return points
 
 
+def history_range(days: int) -> tuple[int, int]:
+    """Começa às 18h do dia anterior para pegar a noite de sono inteira; termina agora."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = int((today - timedelta(days=days - 1) - timedelta(hours=6)).timestamp())
+    return start, int(time.time())
+
+
 def fmt_ts(ts: int) -> str:
     return datetime.fromtimestamp(ts).strftime("%d/%m %H:%M")
+
+
+def device_info(body: bytes) -> dict[str, str]:
+    """Resposta de GetDeviceInfo (TLV entre o 1º e o último byte) como {campo: texto}."""
+    info, fw = {}, {}
+    for t, v in parse_tlv(body[1:-1]):
+        key = INFO_TYPES.get(t, f"tipo_{t}")
+        if key.startswith("fw_"):
+            fw[key[3:]] = ".".join(str(x) for x in v)
+        elif key in ("id", "type", "watchface_atual", "bt_firmware", "serial"):
+            info[key] = v.decode("utf-8", "replace").rstrip(chr(0))
+        elif key == "mac":
+            info[key] = ":".join(f"{x:02X}" for x in v)
+        elif key in ("features", "supported_languages", "map") or t not in INFO_TYPES:
+            info[key] = v.hex(" ")
+        else:
+            info[key] = str(le_int(v))
+    if fw:
+        info = {"firmware": "".join(f"{k}{fw[k]}" for k in "VRTHB" if k in fw), **info}
+    return info
 
 
 def describe(name: str, body: bytes) -> str:
@@ -148,22 +175,7 @@ def describe(name: str, body: bytes) -> str:
     if name == "GetNewestHeartrate":
         return f"formato diferente no LS23 (ainda não decodificado): {body.hex(' ')}"
     if name == "GetDeviceInfo" and len(body) > 1:
-        lines, fw = [], {}
-        for t, v in parse_tlv(body[1:-1]):
-            key = INFO_TYPES.get(t, f"tipo_{t}")
-            if key.startswith("fw_"):
-                fw[key[3:]] = ".".join(str(x) for x in v)
-            elif key in ("id", "type", "watchface_atual", "bt_firmware", "serial"):
-                lines.append(f"  {key}: {v.decode('utf-8', 'replace').rstrip(chr(0))}")
-            elif key == "mac":
-                lines.append(f"  {key}: {':'.join(f'{x:02X}' for x in v)}")
-            elif key in ("features", "supported_languages", "map") or t not in INFO_TYPES:
-                lines.append(f"  {key}: {v.hex(' ')}")
-            else:
-                lines.append(f"  {key}: {le_int(v)}")
-        if fw:
-            lines.insert(0, "  firmware: " + "".join(f"{k}{fw[k]}" for k in "VRTHB" if k in fw))
-        return "\n" + "\n".join(lines)
+        return "\n" + "\n".join(f"  {k}: {v}" for k, v in device_info(body).items())
     return body.hex(" ")
 
 
@@ -310,10 +322,7 @@ async def main() -> int:
             if bodies:
                 print(f"  {describe(name, bodies[0])}")
 
-        # começa às 18h do dia anterior para pegar a noite de sono inteira
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        start = int((today - timedelta(days=args.days - 1) - timedelta(hours=6)).timestamp())
-        end = int(time.time())
+        start, end = history_range(args.days)
         print(f"\nHistórico de {fmt_ts(start)} até {fmt_ts(end)}")
 
         print("\n[Passos]")
