@@ -55,7 +55,7 @@ COMMANDS = [
     ("GetBatteryAndState", 0x08, 0x01),
     ("GetBindState", 0x94, 0x00),
     ("GetDeviceInfo", 0x03, 0x08),
-    ("GetNewestHeartrate", 0x90, 0x01),
+    ("GetNewestHeartrate", 0x62, 0x01),  # 0x62 (tabela com.crrepa.d.a), não 0x90
 ]
 
 # Tipos de histórico (byte 5/6 do pedido e tipo TLV na contagem)
