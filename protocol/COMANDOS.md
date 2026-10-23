@@ -226,9 +226,33 @@ Resposta tratada como dois inteiros LE: **A** = bytes 0–3, **B** = bytes 4–7
 - **Oração islâmica (`0xE7`)**: horários, contas de oração, bússola.
 - **Treino controlado pelo celular (`0x6E`)**: iniciar/pausar treino e mandar dados ao vivo (valores de "ação" não resolvidos).
 
+## Leituras confirmadas no relógio (2026-10-23, `bridge/solaris_probe.py`)
+
+Sonda com 63 GET (só `sub 0x70`): **62 responderam**; `GetBodyState` (`64 70 03 00 00 00`) não responde no LS23.
+
+- **Com dado:** DeviceID, DeviceType, FirmwareVersion, PasscodeAndSwitch, FaceScreen, Brightness, BatteryAndState, Language,
+  SupportedLanguages (29 idiomas), Unit, TimeFormat, WatchfaceName, WatchfaceNameList, UpgradeStatus, BTConnectionState,
+  WeatherUnit, DisplayDuration, UserInfo, WorldClockCityIDs, WorkoutState, SleepState, DeviceFeatures, armazenamento de música/álbum,
+  GpsStatus (validade do AGPS), ProtocolVersion, WatchfaceVersion, SN, VersionForLS, Goal, ActivityNum, HeartrateMonitorInterval,
+  HeartrateAlarm, SedentaryReminderForLS16, **NewestHeartrate (0x62)**, SpO2MonitorInterval, StressMonitorInterval, SpO2Alert,
+  WorkoutCount, FeatureSwitches, UID, BindState, ReminderAndAlarmNum, **Alarms (um pacote por alarme)**, DrinkWater/WashHand,
+  SocialAppSwitches, QuickReplyCount; histórico 0xBE de **estresse**, **SpO2** e **treinos** (atividade veio vazia).
+- **Responde vazio** (comando existe, sem dado): ContactsNum, Volumn, WatchfaceID, WatchfaceIDs, WearHabit, PlateauCare,
+  MapAvailableStorage, SocialApps, AllElectronicCard, Reminders, QuickReplies, AllDrinkWaterRecords.
+
+Diferenças em relação ao que o código do app espera:
+
+- `GetDeviceFeatures` vem como TLV `02 10 <16 bytes>`; os inteiros A e B da seção 11 são os 8 primeiros bytes do dado.
+- `GetSpO2Alert` responde com TLV tipo 3 (o parse do app procura o tipo 1).
+- `GetUserInfo` tem 5 bytes (gênero, idade, altura, peso×10) — sem data de nascimento.
+- `GetSedentaryReminderForLS16` tem 16 bytes; os 8 finais parecem lixo de memória (texto ASCII).
+- `GetMusicAvailableStorage` só devolve o TLV 3 (livre), não o 13 (total).
+- O nome do mostrador vem no formato `JW_LS20WF0190`, não `WF<id>`.
+- `GetSocialAppSwitches`: as 256 chaves estão ligadas.
+
 ## Próximos passos sugeridos
 
-1. Corrigir `GetNewestHeartrate` para `0x62` em `bridge/solaris_read.py` e confirmar no relógio.
-2. Testar as leituras 🟢 novas (SpO2, estresse, alarmes, contatos, configurações) — sem risco.
+1. ~~Corrigir `GetNewestHeartrate` para `0x62`~~ — feito e confirmado.
+2. Levar as leituras novas (SpO2, estresse, alarmes, configurações) para o painel.
 3. Testar ajustes 🟡 lendo o valor antes e gravando de volta (brilho, tempo de tela, levantar o pulso, alarmes).
 4. Deixar 🟠 e 🔴 de fora do painel, ou só atrás de confirmação explícita.

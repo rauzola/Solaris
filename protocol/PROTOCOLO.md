@@ -68,8 +68,8 @@ Tudo em `cmd 0xBE`, intervalo = início/fim em epoch segundos (4 bytes LE cada):
 - Passos: 3 = passos, 4 = calorias (cal, /1000 = kcal), 5 = distância (m), 6 = duração
 - Batimentos: 7 = bpm (a cada ~10 min)
 - Sono: 13 = estado (0 profundo, 1 leve, 2 acordado, 5 REM, 16 entrou, 17 saiu)
-- `GetNewestHeartrate` (0x90/01) responde só 4 bytes no LS23 (`f8 93 20 20`) — **cmd errado**: a op usa outra tabela de
-  constantes e o comando real é `6F 62 70 01 00 01 8F` (ver [COMANDOS.md](COMANDOS.md)); falta confirmar no relógio
+- `GetNewestHeartrate` é `6F 62 70 01 00 01 8F` (**confirmado**): resposta `01 05 <epoch 4B LE> <bpm>`.
+  O `0x90` usado antes é a família FeatureSwitch — os 4 bytes `f8 .. 20 20` eram a máscara de chaves de recurso
 
 ## Configurações (SET)
 - Pedido SET usa `sub = 0x71`; o relógio confirma com `6F 01 81 02 00 <cmd> <status> 8F` (status 00 = OK)
