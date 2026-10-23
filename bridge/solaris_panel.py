@@ -25,13 +25,94 @@ from bleak import BleakClient
 
 from solaris_read import (
     DATA1_READ, DATA_SERVICE, EOF, HIST_HR, HIST_SLEEP, HIST_STEPS, SOF, WATCH_ADDRESS,
-    Link, device_info, find, history_range,
+    Link, device_info, find, history_range, le_int, parse_tlv,
 )
 from solaris_notify import CMD_PUSH_MESSAGE, SET, TYPES, build_message, send
 
 PAGE = Path(__file__).with_name("painel.html")
 CMD_BATTERY, CMD_DEVICE_INFO, CMD_HR_INTERVAL, CMD_ACK = 0x08, 0x03, 0x5C, 0x01
+CMD_NEWEST_HR, CMD_HEALTH_CFG, CMD_ALARMS = 0x62, 0x63, 0x9C
+HIST_STRESS, HIST_SPO2 = 5, 6
 HR_INTERVALS = (0, 3, 10)  # minutos já testados no relógio (0 = desligado)
+
+
+# FeatureSwitch (cmd 0x90): índice do bit -> rótulo
+SWITCHES = [
+    "Alerta de celular longe", "Sincronização automática", "Modo sono", "Sono automático", "Aviso de chamadas",
+    "Aviso de chamada perdida", "Aviso de mensagens", "Aviso de redes sociais", "Aviso de e-mail", "Aviso de agenda",
+    "Lembrete de sedentarismo", "Economia de energia", "Repetir aviso", "Som de aviso", "Levantar o pulso acende a tela",
+    "Aviso de meta atingida", "Batimento em tempo real", "Super alarme", "Monitor de batimento", "Sensor de 3 eixos",
+    "Vibração ao girar", "Monitor de cansaço (estresse)", "Vibração ao tocar", "Toque duplo para voltar",
+    "Tela sempre ligada", "Modo esporte", "Monitor de estresse", "Aviso de movimento", "Tela desligada com dados",
+    "SpO2 contínuo",
+]
+
+
+async def first_body(link: Link, cmd: int, payload: bytes) -> bytes:
+    bodies = await link.request(cmd, payload)
+    return bodies[0] if bodies else b""
+
+
+def hhmm(h: int, m: int) -> str:
+    return f"{h:02d}:{m:02d}"
+
+
+def days_from_mask(mask: int) -> list[int]:
+    """Máscara de dias do relógio (bit 0 = segunda … bit 6 = domingo) -> [0..6]."""
+    return [d for d in range(7) if mask & (1 << d)]
+
+
+async def read_alarms(link: Link) -> list[dict]:
+    """GetAlarms (9C/03) devolve um pacote por alarme: [índice][id] + TLVs 1 nome, 2 dias, 4 hora, 6 ligado."""
+    counts = await first_body(link, CMD_ALARMS, b"\x00")
+    n = counts[1] if len(counts) >= 2 else 0
+    alarms = []
+    for body in await link.request(CMD_ALARMS, b"\x03", expect=n) if n else []:
+        tlv = dict(parse_tlv(body[2:]))
+        if 4 not in tlv or len(tlv[4]) < 2:
+            continue
+        alarms.append({
+            "id": body[1],
+            "nome": tlv.get(1, b"").decode("utf-8", "replace"),
+            "hora": hhmm(tlv[4][0], tlv[4][1]),
+            "dias": days_from_mask(tlv[2][0]) if tlv.get(2) else [],
+            "ligado": tlv.get(6, b"\x00")[0] == 1,
+        })
+    return alarms
+
+
+async def read_config(link: Link) -> dict:
+    """Configurações lidas só com GET; um campo fica None se o relógio não responder."""
+    cfg: dict = {}
+    b = await first_body(link, 0x07, b"\x00")
+    cfg["brilho"] = b[0] if b else None
+    b = await first_body(link, 0x25, b"\x00")
+    cfg["tela_s"] = le_int(b[:2]) if len(b) >= 2 else None
+    b = await first_body(link, 0x0B, b"\x00")
+    cfg["idioma"] = b[0] if b else None
+    b = await first_body(link, 0x0C, b"\x00")
+    cfg["unidade"] = ("métrico" if b[0] == 0 else "imperial") if b else None
+    t = dict(parse_tlv(await first_body(link, 0x0F, b"\x01")))
+    cfg["formato_hora"] = {1: 24, 2: 12}.get(t[1][0]) if t.get(1) else None
+
+    b = await first_body(link, 0x50, b"\x00")  # u16 a cada 3 bytes: passos/100, kcal, …, minutos ativos (offset 12)
+    cfg["metas"] = {"passos": le_int(b[0:2]) * 100, "kcal": le_int(b[3:5]), "minutos": le_int(b[12:14])} if len(b) >= 14 else None
+    b = await first_body(link, 0x5E, b"\x00")
+    cfg["sedentario"] = {"ligado": bool(b[0] & 0x80), "intervalo_min": b[1],
+                         "inicio": hhmm(b[2], b[3]), "fim": hhmm(b[4], b[5])} if len(b) >= 6 else None
+    b = await first_body(link, 0x5D, b"\x00")
+    cfg["alarme_bpm"] = {"alto": b[0], "baixo": b[1], "ligado": b[2] == 1} if len(b) >= 3 else None
+
+    for key, sub in (("intervalo_spo2_min", 1), ("intervalo_estresse_min", 2)):
+        t = dict(parse_tlv(await first_body(link, CMD_HEALTH_CFG, bytes([sub]))))
+        cfg[key] = t[sub][0] if t.get(sub) else None
+
+    b = await first_body(link, 0x90, b"\x00")
+    mask = le_int(b[:4]) if len(b) >= 4 else None
+    cfg["chaves"] = [] if mask is None else [
+        {"bit": i, "rotulo": label, "ligado": bool(mask >> i & 1)} for i, label in enumerate(SWITCHES)
+    ]
+    return cfg
 
 
 def acked(ack: bytes | None, cmd: int) -> bool:
@@ -90,6 +171,14 @@ class Watch:
                               "metros": p.get(5, 0)} for p in steps]
             out["batimentos"] = [[p["t"], p[7]] for p in await link.history(HIST_HR, start, end) if p.get(7)]
             out["sono"] = [[p["t"], p[13]] for p in await link.history(HIST_SLEEP, start, end) if 13 in p]
+            # 0 = sem leitura naquele horário
+            out["spo2"] = [[p["t"], p[11]] for p in await link.history(HIST_SPO2, start, end) if p.get(11)]
+            out["estresse"] = [[p["t"], p[10]] for p in await link.history(HIST_STRESS, start, end) if p.get(10)]
+
+            newest = await first_body(link, CMD_NEWEST_HR, b"\x01")
+            out["ultimo_bpm"] = {"t": le_int(newest[2:6]), "bpm": newest[6]} if len(newest) >= 7 else None
+            out["alarmes"] = await read_alarms(link)
+            out["config"] = await read_config(link)
 
         self.last = out
         return out

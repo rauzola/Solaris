@@ -9,6 +9,7 @@
   --bg: #f6f6f3; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
   --accent: #d9731a; --steps: #2f7d5b; --hr: #c8413b; --ok: #2f7d5b; --err: #b3261e;
   --deep: #2d3f8f; --light: #6f8fe0; --rem: #a46ad8; --awake: #e8a33d;
+  --spo2: #1f7fb8; --stress: #8a5bc4;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -16,6 +17,7 @@
     --bg: #141413; --card: #1e1e1c; --ink: #ecebe6; --muted: #9b9a93; --line: #33322e;
     --accent: #f0913a; --steps: #4fb487; --hr: #ef6a62; --ok: #4fb487; --err: #f2847b;
     --deep: #5b70d6; --light: #8eaaf2; --rem: #bf8cf0; --awake: #f0b85c;
+    --spo2: #5bb6ea; --stress: #b891ec;
     color-scheme: dark;
   }
 }
@@ -23,6 +25,7 @@
   --bg: #141413; --card: #1e1e1c; --ink: #ecebe6; --muted: #9b9a93; --line: #33322e;
   --accent: #f0913a; --steps: #4fb487; --hr: #ef6a62; --ok: #4fb487; --err: #f2847b;
   --deep: #5b70d6; --light: #8eaaf2; --rem: #bf8cf0; --awake: #f0b85c;
+  --spo2: #5bb6ea; --stress: #b891ec;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -78,6 +81,22 @@ textarea { min-height: 72px; resize: vertical; }
 .note { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 details pre { font-size: 12px; overflow: auto; max-height: 360px; background: var(--bg); padding: 10px; border-radius: 8px; }
+.alarm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 0; border-top: 1px solid var(--line); }
+.alarm:first-child { border-top: 0; padding-top: 0; }
+.alarm.off { opacity: .5; }
+.alarm .h { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; min-width: 4.2ch; }
+.alarm .n { flex: 1 1 120px; min-width: 0; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.pill { font-size: 12px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.on { color: var(--ok); border-color: var(--ok); }
+.defs { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+.defs dt { color: var(--muted); }
+.defs dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.keys { margin-top: 14px; border-top: 1px solid var(--line); }
+.key { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.key.off { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -100,6 +119,8 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
     <div class="card kpi"><h2>Bateria</h2><div class="v" id="k-bat">–</div><div class="s" id="k-bat-s">&nbsp;</div></div>
     <div class="card kpi"><h2>Passos hoje</h2><div class="v" id="k-passos">–</div><div class="s" id="k-passos-s">&nbsp;</div></div>
     <div class="card kpi"><h2>Batimento</h2><div class="v" id="k-bpm">–</div><div class="s" id="k-bpm-s">&nbsp;</div></div>
+    <div class="card kpi"><h2>SpO2</h2><div class="v" id="k-spo2">–</div><div class="s" id="k-spo2-s">&nbsp;</div></div>
+    <div class="card kpi"><h2>Estresse</h2><div class="v" id="k-est">–</div><div class="s" id="k-est-s">&nbsp;</div></div>
     <div class="card kpi"><h2>Última noite</h2><div class="v" id="k-sono">–</div><div class="s" id="k-sono-s">&nbsp;</div></div>
   </div>
 
@@ -111,6 +132,16 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
   <div class="card section">
     <h2>Batimentos</h2>
     <div class="chart" id="c-bpm"></div>
+  </div>
+
+  <div class="card section">
+    <h2>Oxigenação (SpO2)</h2>
+    <div class="chart" id="c-spo2"></div>
+  </div>
+
+  <div class="card section">
+    <h2>Estresse</h2>
+    <div class="chart" id="c-est"></div>
   </div>
 
   <div class="card section">
@@ -150,6 +181,11 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
       </div>
       <p class="note">Atual no relógio: <b id="int-atual">–</b>. O app oficial usa 10 min; 3 min foi testado e funciona, mas gasta mais bateria.</p>
     </div>
+  </div>
+
+  <div class="grid two section">
+    <div class="card"><h2>Alarmes</h2><div id="c-alarmes"></div></div>
+    <div class="card"><h2>Configurações do relógio</h2><div id="c-config"></div></div>
   </div>
 
   <div class="card section">
@@ -255,34 +291,47 @@ function drawSteps() {
   });
 }
 
-function drawHr() {
-  const el = $('#c-bpm'), pts = data.batimentos;
-  if (!pts.length) return empty(el, 'Sem batimentos registrados no período.');
+/* Linha/pontos de uma série [[t, v]], quebrando em intervalos > 45 min. */
+function seriesBody(pts, c) {
+  return ({ x, y }) => {
+    const paths = []; let cur = [];
+    pts.forEach((p, i) => {
+      if (i && p[0] - pts[i - 1][0] > 45 * 60) { paths.push(cur); cur = []; }
+      cur.push([x(p[0]).toFixed(1), y(p[1]).toFixed(1)]);
+    });
+    paths.push(cur);
+    return paths.map(seg => seg.length > 1
+      ? `<polyline points="${seg.map(q => q.join(',')).join(' ')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`
+      : `<circle cx="${seg[0][0]}" cy="${seg[0][1]}" r="2.5" fill="${c}"/>`).join('');
+  };
+}
+
+function seriesHover(pts, unit) {
+  return t => {
+    let best = null;
+    for (const p of pts) if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+    if (!best || Math.abs(best[0] - t) > 40 * 60) return null;
+    return { t: best[0], html: `${fmtDH(best[0])} · <b>${best[1]}</b> ${unit}` };
+  };
+}
+
+function drawSeries(sel, pts, msg, color, unit, lo, hi) {
+  const el = $(sel);
+  pts = (pts || []).filter(p => Array.isArray(p) && p[1] != null);
+  if (!pts.length) return empty(el, msg);
   const vals = pts.map(p => p[1]);
-  const yMin = Math.max(0, Math.floor((Math.min(...vals) - 10) / 10) * 10), yMax = Math.ceil((Math.max(...vals) + 10) / 10) * 10;
-  const mid = Math.round((yMin + yMax) / 20) * 10;
+  const yMin = Math.max(lo, Math.floor((Math.min(...vals) - 10) / 10) * 10);
+  let yMax = Math.min(hi, Math.ceil((Math.max(...vals) + 10) / 10) * 10);
+  if (yMax <= yMin) yMax = yMin + 10;
   chart(el, {
-    t0: data.inicio, t1: data.fim, h: 200, yMin, yMax, yTicks: [yMin, mid, yMax],
-    body: ({ x, y }) => {
-      let paths = [], cur = [];
-      pts.forEach((p, i) => {
-        if (i && p[0] - pts[i - 1][0] > 45 * 60) { paths.push(cur); cur = []; }
-        cur.push(`${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`);
-      });
-      paths.push(cur);
-      const c = css('--hr');
-      return paths.map(seg => seg.length > 1
-        ? `<polyline points="${seg.join(' ')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>`
-        : `<circle cx="${seg[0].split(',')[0]}" cy="${seg[0].split(',')[1]}" r="2.5" fill="${c}"/>`).join('');
-    },
-    hover: t => {
-      let best = null;
-      for (const p of pts) if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
-      if (!best || Math.abs(best[0] - t) > 40 * 60) return null;
-      return { t: best[0], html: `${fmtDH(best[0])} · <b>${best[1]}</b> bpm` };
-    },
+    t0: data.inicio, t1: data.fim, h: 200, yMin, yMax, yTicks: [yMin, Math.round((yMin + yMax) / 2), yMax],
+    body: seriesBody(pts, css(color)), hover: seriesHover(pts, unit),
   });
 }
+
+const drawHr = () => drawSeries('#c-bpm', data.batimentos, 'Sem batimentos registrados no período.', '--hr', 'bpm', 0, 300);
+const drawSpo2 = () => drawSeries('#c-spo2', data.spo2, 'Sem leituras de SpO2 no período.', '--spo2', '%', 90, 100);
+const drawStress = () => drawSeries('#c-est', data.estresse, 'Sem leituras de estresse no período.', '--stress', 'de estresse', 0, 100);
 
 /* Divide os pontos de sono em noites (intervalo > 6 h começa outra) e cada noite em trechos por estágio. */
 function nights() {
@@ -341,6 +390,14 @@ function drawDays() {
   $('#t-dias').innerHTML = `<table><thead><tr><th>Dia</th><th>Passos</th><th>kcal</th><th>km</th><th>bpm mín / méd / máx</th><th>Medições</th><th>Sono (noite que terminou no dia)</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
 
+const stats = a => { const v = a.map(p => p[1]); return `${Math.min(...v)}–${Math.max(...v)}, média ${Math.round(v.reduce((x, y) => x + y, 0) / v.length)}`; };
+function kpiSeries(sel, pts, unit) {
+  pts = pts || [];
+  const last = pts.at(-1);
+  $(sel).innerHTML = last ? `${last[1]}${unit ? `<span>${unit}</span>` : ''}` : '–';
+  $(sel + '-s').textContent = last ? `às ${fmtH(last[0])} · período ${stats(pts)} · ${pts.length} leituras` : 'sem leituras';
+}
+
 function drawKpis() {
   const b = data.bateria;
   $('#k-bat').innerHTML = b ? `${b.nivel}<span>%</span>` : '–';
@@ -351,12 +408,14 @@ function drawKpis() {
   $('#k-passos').textContent = num(steps);
   $('#k-passos-s').textContent = `${todays.reduce((a, p) => a + p.kcal, 0).toFixed(0)} kcal · ${(todays.reduce((a, p) => a + p.metros, 0) / 1000).toFixed(2)} km`;
 
-  const hr = data.batimentos;
-  if (hr.length) {
-    const v = hr.map(p => p[1]), last = hr.at(-1);
+  const hr = data.batimentos || [], ub = data.ultimo_bpm;
+  const last = ub && ub.bpm ? [ub.t, ub.bpm] : hr.at(-1);
+  if (last) {
     $('#k-bpm').innerHTML = `${last[1]}<span>bpm</span>`;
-    $('#k-bpm-s').textContent = `às ${fmtH(last[0])} · período ${Math.min(...v)}–${Math.max(...v)}, média ${Math.round(v.reduce((a, b) => a + b, 0) / v.length)}`;
+    $('#k-bpm-s').textContent = `às ${fmtH(last[0])}` + (hr.length ? ` · período ${stats(hr)}` : '');
   } else { $('#k-bpm').textContent = '–'; $('#k-bpm-s').textContent = 'sem medições'; }
+  kpiSeries('#k-spo2', data.spo2, '%');
+  kpiSeries('#k-est', data.estresse, '');
 
   const n = nights().at(-1);
   if (n) { $('#k-sono').textContent = dur(n.asleep); $('#k-sono-s').textContent = `${fmtH(n.t0)} → ${fmtH(n.t1)} · profundo ${dur(n.totals[0])}`; }
@@ -364,6 +423,42 @@ function drawKpis() {
 
   $('#int-atual').textContent = data.intervalo_bpm == null ? '–' : data.intervalo_bpm === 0 ? 'desligado' : `${data.intervalo_bpm} min`;
   if (data.intervalo_bpm != null) $('#intervalo').value = data.intervalo_bpm;
+}
+
+const DIAS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+const IDIOMAS = { 11: 'Português', 0: 'Inglês', 6: 'Espanhol' };
+const pill = on => `<span class="pill${on ? ' on' : ''}">${on ? 'ligado' : 'desligado'}</span>`;
+const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function drawAlarms() {
+  const el = $('#c-alarmes'), list = [...(data.alarmes || [])].sort((a, b) => String(a.hora).localeCompare(String(b.hora)));
+  if (!list.length) return empty(el, 'Sem alarmes lidos do relógio.');
+  el.innerHTML = list.map(a => {
+    const dias = a.dias || [];
+    const chips = dias.length ? DIAS.map((d, i) => `<span class="chip${dias.includes(i) ? ' on' : ''}">${d}</span>`).join('') : '<span class="chip on">Uma vez</span>';
+    return `<div class="alarm${a.ligado ? '' : ' off'}"><span class="h">${esc(a.hora ?? '--:--')}</span><span class="n">${esc(a.nome || 'Alarme')}</span><span class="chips">${chips}</span>${pill(a.ligado)}</div>`;
+  }).join('');
+}
+
+function drawConfig() {
+  const el = $('#c-config'), c = data.config;
+  if (!c) return empty(el, 'Configurações não lidas do relógio.');
+  const sed = c.sedentario, bpm = c.alarme_bpm, m = c.metas;
+  const rows = [
+    ['Brilho', c.brilho],
+    ['Tempo de tela (s)', c.tela_s],
+    ['Idioma', c.idioma == null ? null : IDIOMAS[c.idioma] ?? `código ${c.idioma}`],
+    ['Unidades', c.unidade],
+    ['Formato de hora', c.formato_hora == null ? null : `${c.formato_hora} h`],
+    ['Metas', m && `${m.passos == null ? '–' : num(m.passos)} passos · ${m.kcal ?? '–'} kcal · ${m.minutos ?? '–'} min ativos`],
+    ['Lembrete de sedentarismo', sed && `${sed.ligado ? 'ligado' : 'desligado'} · a cada ${sed.intervalo_min ?? '–'} min · das ${sed.inicio ?? '–'} às ${sed.fim ?? '–'}`],
+    ['Alerta de batimento', bpm && `${bpm.ligado ? 'ligado' : 'desligado'} · alto ${bpm.alto ?? '–'} · baixo ${bpm.baixo ?? '–'} bpm`],
+    ['Intervalo SpO2 / estresse (min)', c.intervalo_spo2_min == null && c.intervalo_estresse_min == null ? null : `${c.intervalo_spo2_min ?? '–'} / ${c.intervalo_estresse_min ?? '–'}`],
+    ['Intervalo de batimento', data.intervalo_bpm == null ? null : data.intervalo_bpm === 0 ? 'desligado' : `${data.intervalo_bpm} min`],
+  ].filter(([, v]) => v != null && v !== '');
+  const keys = [...(c.chaves || [])].sort((a, b) => (b.ligado ? 1 : 0) - (a.ligado ? 1 : 0));
+  el.innerHTML = `<dl class="defs">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
+    + (keys.length ? `<div class="keys">${keys.map(k => `<div class="key${k.ligado ? '' : ' off'}"><span>${esc(k.rotulo || k.nome || '')}</span>${pill(k.ligado)}</div>`).join('')}</div>` : '');
 }
 
 function drawDevice() {
@@ -379,14 +474,14 @@ function drawDevice() {
 function render() {
   if (!data) return;
   $('#dias').value = data.dias;
-  drawKpis(); drawSteps(); drawHr(); drawSleep(); drawDays(); drawDevice();
+  drawKpis(); drawSteps(); drawHr(); drawSpo2(); drawStress(); drawSleep(); drawDays(); drawAlarms(); drawConfig(); drawDevice();
 }
 
 async function read() {
   await run('Lendo o relógio… (leva uns 10–30 s; o Bluetooth do celular precisa estar desligado)', async () => {
     data = await api(`/api/dados?dias=${$('#dias').value}`);
     render();
-    setStatus(`Leitura concluída às ${fmtH(data.lido_em)}: ${data.passos.length} registros de passos, ${data.batimentos.length} batimentos, ${data.sono.length} pontos de sono.`, 'ok');
+    setStatus(`Leitura concluída às ${fmtH(data.lido_em)}: ${data.passos.length} registros de passos, ${data.batimentos.length} batimentos, ${(data.spo2 || []).length} de SpO2, ${(data.estresse || []).length} de estresse, ${data.sono.length} pontos de sono.`, 'ok');
   });
 }
 
