@@ -62,17 +62,23 @@ def days_from_mask(mask: int) -> list[int]:
     return [d for d in range(7) if mask & (1 << d)]
 
 
-async def read_alarms(link: Link) -> list[dict]:
-    """GetAlarms (9C/03) devolve um pacote por alarme: [índice][id] + TLVs 1 nome, 2 dias, 4 hora, 6 ligado."""
+async def raw_alarms(link: Link) -> list[tuple[int, list[tuple[int, bytes]]]]:
+    """GetAlarms (9C/03) devolve um pacote por alarme: [índice][id] + TLVs na mesma ordem que o SetAlarms grava."""
     counts = await first_body(link, CMD_ALARMS, b"\x00")
     n = counts[1] if len(counts) >= 2 else 0
+    bodies = await link.request(CMD_ALARMS, b"\x03", expect=n) if n else []
+    return [(body[1], parse_tlv(body[2:])) for body in bodies if len(body) > 2]
+
+
+async def read_alarms(link: Link) -> list[dict]:
+    """Alarmes legíveis: TLVs 1 nome, 2 dias, 4 hora, 6 ligado."""
     alarms = []
-    for body in await link.request(CMD_ALARMS, b"\x03", expect=n) if n else []:
-        tlv = dict(parse_tlv(body[2:]))
+    for alarm_id, tlvs in await raw_alarms(link):
+        tlv = dict(tlvs)
         if 4 not in tlv or len(tlv[4]) < 2:
             continue
         alarms.append({
-            "id": body[1],
+            "id": alarm_id,
             "nome": tlv.get(1, b"").decode("utf-8", "replace"),
             "hora": hhmm(tlv[4][0], tlv[4][1]),
             "dias": days_from_mask(tlv[2][0]) if tlv.get(2) else [],
@@ -113,6 +119,122 @@ async def read_config(link: Link) -> dict:
         {"bit": i, "rotulo": label, "ligado": bool(mask >> i & 1)} for i, label in enumerate(SWITCHES)
     ]
     return cfg
+
+
+# ---- Ajustes (SET). Só os reversíveis do catálogo; cada um é validado e o relógio precisa confirmar.
+
+LANGUAGES = {0: "Inglês", 6: "Espanhol", 11: "Português"}
+SCREEN_SECONDS = (5, 10, 15)  # mesmas opções da tela do app
+HEALTH_INTERVALS = (10, 15, 30, 60)  # SpO2/estresse, minutos
+SEDENTARY_INTERVALS = (30, 45, 60, 90, 120)
+
+
+def need(ok: bool, msg: str) -> None:
+    if not ok:
+        raise web.HTTPBadRequest(text=msg)
+
+
+def parse_hhmm(value) -> tuple[int, int]:
+    try:
+        h, m = (int(x) for x in str(value).split(":"))
+    except ValueError:
+        h = m = -1
+    need(0 <= h < 24 and 0 <= m < 60, f"Horário inválido: {value!r} (use HH:MM).")
+    return h, m
+
+
+def tlv_bytes(tlvs: list[tuple[int, bytes]]) -> bytes:
+    return b"".join(bytes([t, len(v)]) + v for t, v in tlvs)
+
+
+async def set_cmd(client: BleakClient, link: Link, cmd: int, payload: bytes) -> None:
+    pkt = bytes([SOF, cmd, SET]) + len(payload).to_bytes(2, "little") + payload + bytes([EOF])
+    if not acked(await send(client, link, pkt), cmd):
+        raise web.HTTPBadGateway(text=f"O relógio recusou o ajuste (cmd {cmd:02X}).")
+
+
+async def set_alarm(client: BleakClient, link: Link, v: dict) -> None:
+    """SetAlarms regrava a lista inteira (um pacote por alarme). Reenvia os TLVs lidos agora, mudando só o alvo."""
+    alarms = await raw_alarms(link)
+    need(any(a_id == v.get("id") for a_id, _ in alarms), "Alarme não encontrado no relógio.")
+    n = len(alarms)
+    for a_id, tlvs in alarms:
+        if a_id == v["id"]:
+            tlvs = dict(tlvs)
+            if "ligado" in v:
+                tlvs[6] = bytes([1 if v["ligado"] else 0])
+            if "hora" in v:
+                tlvs[4] = bytes(parse_hhmm(v["hora"]))
+            if "dias" in v:
+                days = v["dias"]
+                need(isinstance(days, list) and days and all(d in range(7) for d in days),
+                     "Escolha pelo menos um dia (0 = segunda … 6 = domingo).")
+                tlvs[2] = bytes([sum(1 << d for d in set(days))])
+            tlvs = sorted(tlvs.items())
+        payload = bytes([0x06, (a_id & 0x0F) | ((n << 4) & 0xF0)]) + tlv_bytes(tlvs)
+        await set_cmd(client, link, CMD_ALARMS, payload)
+
+
+async def set_sedentary(client: BleakClient, link: Link, v: dict) -> None:
+    need(v.get("intervalo_min") in SEDENTARY_INTERVALS, f"Intervalo deve ser um destes: {SEDENTARY_INTERVALS}.")
+    h1, m1 = parse_hhmm(v.get("inicio"))
+    h2, m2 = parse_hhmm(v.get("fim"))
+    days = 0x7F | (0x80 if v.get("ligado") else 0)  # o app sempre manda todos os dias
+    # 0x14 0x00 fixo (como o app); pausa de almoço desligada, 12:00–14:00
+    await set_cmd(client, link, 0x5E, bytes([days, v["intervalo_min"], h1, m1, h2, m2, 0x14, 0x00, 0, 12, 0, 14, 0]))
+
+
+async def set_goals(client: BleakClient, link: Link, v: dict) -> None:
+    steps, kcal, minutes = v.get("passos"), v.get("kcal"), v.get("minutos")
+    need(isinstance(steps, int) and 1000 <= steps <= 50000 and steps % 100 == 0, "Meta de passos: 1.000 a 50.000, de 100 em 100.")
+    need(isinstance(kcal, int) and 50 <= kcal <= 3000, "Meta de kcal: 50 a 3.000.")
+    need(isinstance(minutes, int) and 5 <= minutes <= 300, "Meta de minutos ativos: 5 a 300.")
+    for goal_type, value in ((0, steps // 100), (1, kcal), (4, minutes)):
+        await set_cmd(client, link, 0x50, bytes([goal_type]) + value.to_bytes(2, "little") + b"\x01")
+
+
+async def apply_setting(client: BleakClient, link: Link, field: str, v) -> None:
+    """Lista fechada de campos que o painel pode gravar."""
+    if field == "chave":
+        need(isinstance(v, dict) and v.get("bit") in range(len(SWITCHES)), "Chave inválida.")
+        await set_cmd(client, link, 0x90, bytes([0x01, v["bit"], 1 if v.get("ligado") else 0]))
+    elif field == "brilho":
+        need(isinstance(v, int) and 0 <= v <= 100, "Brilho: 0 a 100.")
+        await set_cmd(client, link, 0x07, bytes([v]))
+    elif field == "tela_s":
+        need(v in SCREEN_SECONDS, f"Tempo de tela deve ser um destes: {SCREEN_SECONDS}.")
+        await set_cmd(client, link, 0x25, v.to_bytes(2, "little"))
+    elif field == "idioma":
+        need(v in LANGUAGES, f"Idioma deve ser um destes: {LANGUAGES}.")
+        await set_cmd(client, link, 0x0B, bytes([v]))
+    elif field == "unidade":
+        need(v in ("métrico", "imperial"), "Unidade: métrico ou imperial.")
+        await set_cmd(client, link, 0x0C, bytes([0 if v == "métrico" else 1]))
+    elif field == "formato_hora":
+        need(v in (24, 12), "Formato de hora: 24 ou 12.")
+        await set_cmd(client, link, 0x0F, bytes([1, 1, 1 if v == 24 else 2]))
+    elif field == "metas":
+        need(isinstance(v, dict), "Metas inválidas.")
+        await set_goals(client, link, v)
+    elif field == "sedentario":
+        need(isinstance(v, dict), "Lembrete inválido.")
+        await set_sedentary(client, link, v)
+    elif field == "alarme_bpm":
+        need(isinstance(v, dict) and v.get("alto") in range(100, 201) and v.get("baixo") in range(30, 61),
+             "Alerta de batimento: alto 100–200, baixo 30–60.")
+        await set_cmd(client, link, 0x5D, bytes([v["alto"], v["baixo"], 1 if v.get("ligado") else 0]))
+    elif field in ("intervalo_spo2_min", "intervalo_estresse_min"):
+        need(v in HEALTH_INTERVALS, f"Intervalo deve ser um destes: {HEALTH_INTERVALS}.")
+        sub = 1 if field == "intervalo_spo2_min" else 2
+        await set_cmd(client, link, CMD_HEALTH_CFG, bytes([sub, 1, v]))
+    elif field == "intervalo_bpm":
+        need(v in HR_INTERVALS, f"Intervalo deve ser um destes: {HR_INTERVALS}.")
+        await set_cmd(client, link, CMD_HR_INTERVAL, bytes([v]))
+    elif field == "alarme":
+        need(isinstance(v, dict), "Alarme inválido.")
+        await set_alarm(client, link, v)
+    else:
+        raise web.HTTPBadRequest(text=f"Campo não pode ser alterado pelo painel: {field!r}.")
 
 
 def acked(ack: bytes | None, cmd: int) -> bool:
@@ -189,16 +311,16 @@ class Watch:
             if not acked(await send(client, link, pkt), CMD_PUSH_MESSAGE):
                 raise web.HTTPBadGateway(text="O relógio não confirmou a notificação.")
 
-    async def set_hr_interval(self, minutes: int) -> int:
+    async def adjust(self, field: str, value) -> dict:
+        """Grava um ajuste e relê do relógio o que ficou valendo."""
         async with self.connect() as (_, client, link):
-            pkt = bytes([SOF, CMD_HR_INTERVAL, SET, 1, 0, minutes, EOF])
-            if not acked(await send(client, link, pkt), CMD_HR_INTERVAL):
-                raise web.HTTPBadGateway(text="O relógio não confirmou o novo intervalo.")
-            back = await link.request(CMD_HR_INTERVAL, b"\x00")
-        value = back[0][0] if back and back[0] else minutes
+            await apply_setting(client, link, field, value)
+            interval = await first_body(link, CMD_HR_INTERVAL, b"\x00")
+            out = {"config": await read_config(link), "alarmes": await read_alarms(link),
+                   "intervalo_bpm": interval[0] if interval else None}
         if self.last is not None:
-            self.last["intervalo_bpm"] = value
-        return value
+            self.last.update(out)
+        return out
 
 
 def make_app(watch: Watch) -> web.Application:
@@ -206,7 +328,11 @@ def make_app(watch: Watch) -> web.Application:
         return web.FileResponse(PAGE)
 
     async def config(_):
-        return web.json_response({"tipos": sorted(TYPES), "intervalos": HR_INTERVALS, "ultimo": watch.last})
+        return web.json_response({
+            "tipos": sorted(TYPES), "intervalos": HR_INTERVALS, "ultimo": watch.last,
+            "opcoes": {"idiomas": LANGUAGES, "tela_s": SCREEN_SECONDS, "intervalos_saude": HEALTH_INTERVALS,
+                       "intervalos_sedentario": SEDENTARY_INTERVALS},
+        })
 
     async def dados(req: web.Request):
         days = int(req.query.get("dias", 1))
@@ -222,10 +348,11 @@ def make_app(watch: Watch) -> web.Application:
         return web.json_response({"ok": True})
 
     async def intervalo(req: web.Request):
-        minutes = (await req.json()).get("minutos")
-        if minutes not in HR_INTERVALS:
-            raise web.HTTPBadRequest(text=f"Intervalo deve ser um destes: {HR_INTERVALS}.")
-        return web.json_response({"intervalo_bpm": await watch.set_hr_interval(minutes)})
+        return web.json_response(await watch.adjust("intervalo_bpm", (await req.json()).get("minutos")))
+
+    async def ajuste(req: web.Request):
+        body = await req.json()
+        return web.json_response(await watch.adjust(str(body.get("campo")), body.get("valor")))
 
     @web.middleware
     async def errors(req: web.Request, handler):
@@ -244,6 +371,7 @@ def make_app(watch: Watch) -> web.Application:
         web.get("/api/dados", dados),
         web.post("/api/notificar", notificar),
         web.post("/api/intervalo", intervalo),
+        web.post("/api/ajuste", ajuste),
     ])
     return app
 

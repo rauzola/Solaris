@@ -48,7 +48,7 @@ select { width: auto; }
 #status.ok { color: var(--ok); }
 .grid { display: grid; gap: 14px; }
 .kpis { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px; }
-.two { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.two { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
 .kpi .v { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .kpi .v span { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 3px; }
@@ -97,6 +97,32 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
 .keys { margin-top: 14px; border-top: 1px solid var(--line); }
 .key { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .key.off { color: var(--muted); }
+.card-heading { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin-bottom: 12px; }
+.card-heading h2, .card-heading .note { margin: 0; }
+.settings { display: grid; gap: 12px; }
+.setting { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.setting > label:not(.switch) { flex: 1 1 130px; }
+.setting select { max-width: 100%; min-width: 0; }
+.brightness { display: flex; align-items: center; gap: 8px; flex: 1 1 130px; min-width: 0; }
+.brightness input { min-width: 0; padding: 0; accent-color: var(--accent); }
+.brightness output { min-width: 4ch; text-align: right; font-variant-numeric: tabular-nums; }
+.setting-group { border: 0; border-top: 1px solid var(--line); margin: 4px 0 0; padding: 12px 0 0; min-width: 0; }
+.setting-group legend { font-size: 14px; font-weight: 600; padding: 0 6px 0 0; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(110px, 100%), 1fr)); gap: 10px; }
+.fields input, .fields select { width: 100%; min-width: 0; max-width: 100%; }
+.switch { position: relative; display: inline-flex; flex: 0 0 auto; align-items: center; cursor: pointer; }
+.switch input { position: absolute; width: 40px; height: 24px; margin: 0; opacity: 0; padding: 0; }
+.switch span { display: block; width: 40px; height: 24px; border-radius: 12px; background: var(--muted); }
+.switch span::after { content: ''; display: block; width: 18px; height: 18px; margin: 3px; border-radius: 50%; background: var(--card); transition: transform .15s; }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::after { transform: translateX(16px); }
+.switch input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 3px; }
+.switch input:disabled + span { opacity: .55; cursor: wait; }
+.alarm-editor { flex: 1 1 100%; min-width: 0; }
+.alarm-editor input[type=time] { width: 100%; min-width: 0; }
+button.chip { background: var(--card); font-weight: 500; min-height: 32px; padding: 4px 8px; }
+button.chip.on { background: var(--accent); }
+input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: wait; }
 </style>
 </head>
 <body>
@@ -113,7 +139,7 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
       <button class="ghost" id="tema" title="Alternar tema">◐</button>
     </div>
   </header>
-  <div id="status"></div>
+  <div id="status" role="status" aria-live="polite"></div>
 
   <div class="grid kpis">
     <div class="card kpi"><h2>Bateria</h2><div class="v" id="k-bat">–</div><div class="s" id="k-bat-s">&nbsp;</div></div>
@@ -176,8 +202,7 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
     <div class="card">
       <h2>Medição de batimentos</h2>
       <div class="row">
-        <label>Intervalo automático <select id="intervalo"></select></label>
-        <button id="aplicar">Aplicar</button>
+        <label>Intervalo automático <select id="intervalo" disabled></select></label>
       </div>
       <p class="note">Atual no relógio: <b id="int-atual">–</b>. O app oficial usa 10 min; 3 min foi testado e funciona, mas gasta mais bateria.</p>
     </div>
@@ -185,7 +210,7 @@ details pre { font-size: 12px; overflow: auto; max-height: 360px; background: va
 
   <div class="grid two section">
     <div class="card"><h2>Alarmes</h2><div id="c-alarmes"></div></div>
-    <div class="card"><h2>Configurações do relógio</h2><div id="c-config"></div></div>
+    <div class="card"><div class="card-heading"><h2>Configurações do relógio</h2><p class="note">Alterações são gravadas direto no relógio.</p></div><div id="c-config"></div></div>
   </div>
 
   <div class="card section">
@@ -211,6 +236,10 @@ const LANES = [2, 5, 1, 0];
 const SLEEP_LABELS = { 16: 'entrou', 17: 'saiu' };
 
 let data = null;
+let opcoes = {};
+let running = false;
+const drafts = new Map();
+const editingAlarms = new Set();
 
 function setStatus(msg, kind = '') { const el = $('#status'); el.textContent = msg; el.className = kind; }
 
@@ -220,11 +249,17 @@ async function api(path, body) {
   return res.json();
 }
 
-function busy(on) { document.querySelectorAll('button:not(.ghost)').forEach(b => b.disabled = on); }
+function busy(on) {
+  document.querySelectorAll('button:not(#tema), select, input, textarea').forEach(el => {
+    if (on && !el.disabled) { el.dataset.busy = ''; el.disabled = true; }
+    else if (!on && el.hasAttribute('data-busy')) { el.disabled = false; delete el.dataset.busy; }
+  });
+}
 
 async function run(msg, fn) {
-  busy(true); setStatus(msg);
-  try { await fn(); } catch (e) { setStatus(e.message, 'err'); } finally { busy(false); }
+  if (running) return;
+  running = true; busy(true); setStatus(msg);
+  try { await fn(); } catch (e) { setStatus(e.message, 'err'); } finally { running = false; busy(false); }
 }
 
 function nice(v) {
@@ -422,13 +457,41 @@ function drawKpis() {
   else { $('#k-sono').textContent = '–'; $('#k-sono-s').textContent = 'sem registro'; }
 
   $('#int-atual').textContent = data.intervalo_bpm == null ? '–' : data.intervalo_bpm === 0 ? 'desligado' : `${data.intervalo_bpm} min`;
-  if (data.intervalo_bpm != null) $('#intervalo').value = data.intervalo_bpm;
+  $('#intervalo').value = data.intervalo_bpm ?? '';
+  delete $('#intervalo').dataset.busy;
+  $('#intervalo').disabled = data.intervalo_bpm == null;
 }
 
 const DIAS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
-const IDIOMAS = { 11: 'Português', 0: 'Inglês', 6: 'Espanhol' };
-const pill = on => `<span class="pill${on ? ' on' : ''}">${on ? 'ligado' : 'desligado'}</span>`;
 const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const switchControl = (name, on, label, attrs = '') => `<label class="switch"><input type="checkbox" name="${esc(name)}" aria-label="${esc(label)}" ${on ? 'checked' : ''} ${attrs}><span aria-hidden="true"></span></label>`;
+function selectControl(name, value, entries, attrs = '') {
+  const known = entries.some(([v]) => String(v) === String(value));
+  return `<select name="${esc(name)}" required ${attrs}>`
+    + (!known ? `<option value="" selected disabled>${value == null ? 'Não lido' : esc(value) + ' (atual)'}</option>` : '')
+    + entries.map(([v, label]) => `<option value="${esc(v)}" ${String(v) === String(value) ? 'selected' : ''}>${esc(label)}</option>`).join('') + '</select>';
+}
+const intervals = values => (values || []).map(v => [v, v === 0 ? 'Desligado' : `${v} min`]);
+const numberControl = (name, label, value, min, max, step = 1) => `<label>${label}<input type="number" name="${name}" value="${esc(value ?? '')}" min="${min}" max="${max}" step="${step}" required></label>`;
+
+function formValues(form) {
+  return Object.fromEntries([...form.querySelectorAll('input, select')].map(el => [el.name,
+    el.type === 'checkbox' ? el.checked : el.type === 'number' || el.tagName === 'SELECT' ? Number(el.value) : el.value]));
+}
+
+async function adjust(campo, valor, draftKey, onSuccess) {
+  await run('Gravando no relógio…', async () => {
+    try {
+      const r = await api('/api/ajuste', { campo, valor });
+      data.config = r.config; data.alarmes = r.alarmes; data.intervalo_bpm = r.intervalo_bpm;
+      if (onSuccess) onSuccess();
+      setStatus('Alteração gravada no relógio.', 'ok');
+    } finally {
+      if (draftKey) drafts.delete(draftKey);
+      render();
+    }
+  });
+}
 
 function drawAlarms() {
   const el = $('#c-alarmes'), list = [...(data.alarmes || [])].sort((a, b) => String(a.hora).localeCompare(String(b.hora)));
@@ -436,29 +499,81 @@ function drawAlarms() {
   el.innerHTML = list.map(a => {
     const dias = a.dias || [];
     const chips = dias.length ? DIAS.map((d, i) => `<span class="chip${dias.includes(i) ? ' on' : ''}">${d}</span>`).join('') : '<span class="chip on">Uma vez</span>';
-    return `<div class="alarm${a.ligado ? '' : ' off'}"><span class="h">${esc(a.hora ?? '--:--')}</span><span class="n">${esc(a.nome || 'Alarme')}</span><span class="chips">${chips}</span>${pill(a.ligado)}</div>`;
+    const key = `alarme-${a.id}`, draft = drafts.get(key) || a, editing = editingAlarms.has(a.id);
+    return `<div class="alarm" data-alarm="${esc(a.id)}"><span class="h">${esc(a.hora ?? '--:--')}</span><span class="n">${esc(a.nome || 'Alarme')}</span>
+      ${switchControl('ligado', a.ligado, `Ativar ${a.nome || 'alarme'} às ${a.hora}`, 'data-alarm-toggle')}
+      <button type="button" class="ghost" data-edit aria-expanded="${editing}">${editing ? 'Cancelar' : 'Editar'}</button>
+      <div class="chips">${chips}</div>
+      ${editing ? `<form class="alarm-editor" data-draft="${esc(key)}">
+        <label>Horário <input type="time" name="hora" value="${esc(draft.hora ?? '')}" required></label>
+        <div class="chips" role="group" aria-label="Dias do alarme">${DIAS.map((d, i) => `<button type="button" class="chip${(draft.dias || []).includes(i) ? ' on' : ''}" data-day="${i}" aria-pressed="${(draft.dias || []).includes(i)}">${d}</button>`).join('')}</div>
+        <p class="note">Selecione pelo menos um dia.</p><div><button type="submit">Salvar</button></div>
+      </form>` : ''}</div>`;
   }).join('');
+  el.querySelectorAll('[data-alarm]').forEach(row => {
+    const id = Number(row.dataset.alarm), key = `alarme-${id}`;
+    row.querySelector('[data-alarm-toggle]').onchange = e => adjust('alarme', { id, ligado: e.target.checked });
+    row.querySelector('[data-edit]').onclick = () => {
+      if (editingAlarms.has(id)) { editingAlarms.delete(id); drafts.delete(key); }
+      else editingAlarms.add(id);
+      drawAlarms();
+    };
+    const form = row.querySelector('form');
+    if (!form) return;
+    const remember = () => {
+      const v = { hora: form.elements.hora.value, dias: [...form.querySelectorAll('[data-day][aria-pressed="true"]')].map(b => Number(b.dataset.day)) };
+      drafts.set(key, v); return v;
+    };
+    form.oninput = remember;
+    form.querySelectorAll('[data-day]').forEach(b => b.onclick = () => {
+      const on = b.getAttribute('aria-pressed') !== 'true';
+      b.setAttribute('aria-pressed', String(on)); b.classList.toggle('on', on); remember();
+    });
+    form.onsubmit = e => {
+      e.preventDefault();
+      const v = remember();
+      if (!v.dias.length) { setStatus('Selecione pelo menos um dia para o alarme.', 'err'); return; }
+      adjust('alarme', { id, ...v }, key, () => editingAlarms.delete(id));
+    };
+  });
 }
 
 function drawConfig() {
   const el = $('#c-config'), c = data.config;
   if (!c) return empty(el, 'Configurações não lidas do relógio.');
-  const sed = c.sedentario, bpm = c.alarme_bpm, m = c.metas;
+  const sed = drafts.get('sedentario') || c.sedentario, bpm = drafts.get('alarme_bpm') || c.alarme_bpm, m = drafts.get('metas') || c.metas;
   const rows = [
-    ['Brilho', c.brilho],
-    ['Tempo de tela (s)', c.tela_s],
-    ['Idioma', c.idioma == null ? null : IDIOMAS[c.idioma] ?? `código ${c.idioma}`],
-    ['Unidades', c.unidade],
-    ['Formato de hora', c.formato_hora == null ? null : `${c.formato_hora} h`],
-    ['Metas', m && `${m.passos == null ? '–' : num(m.passos)} passos · ${m.kcal ?? '–'} kcal · ${m.minutos ?? '–'} min ativos`],
-    ['Lembrete de sedentarismo', sed && `${sed.ligado ? 'ligado' : 'desligado'} · a cada ${sed.intervalo_min ?? '–'} min · das ${sed.inicio ?? '–'} às ${sed.fim ?? '–'}`],
-    ['Alerta de batimento', bpm && `${bpm.ligado ? 'ligado' : 'desligado'} · alto ${bpm.alto ?? '–'} · baixo ${bpm.baixo ?? '–'} bpm`],
-    ['Intervalo SpO2 / estresse (min)', c.intervalo_spo2_min == null && c.intervalo_estresse_min == null ? null : `${c.intervalo_spo2_min ?? '–'} / ${c.intervalo_estresse_min ?? '–'}`],
-    ['Intervalo de batimento', data.intervalo_bpm == null ? null : data.intervalo_bpm === 0 ? 'desligado' : `${data.intervalo_bpm} min`],
-  ].filter(([, v]) => v != null && v !== '');
+    ['tela_s', 'Tempo de tela', (opcoes.tela_s || []).map(v => [v, `${v} s`])],
+    ['idioma', 'Idioma', Object.entries(opcoes.idiomas || {})],
+    ['unidade', 'Unidades', [['métrico', 'Métrico'], ['imperial', 'Imperial']]],
+    ['formato_hora', 'Formato de hora', [[24, '24 h'], [12, '12 h']]],
+    ['intervalo_spo2_min', 'Intervalo SpO2', intervals(opcoes.intervalos_saude)],
+    ['intervalo_estresse_min', 'Intervalo de estresse', intervals(opcoes.intervalos_saude)],
+  ];
   const keys = [...(c.chaves || [])].sort((a, b) => (b.ligado ? 1 : 0) - (a.ligado ? 1 : 0));
-  el.innerHTML = `<dl class="defs">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
-    + (keys.length ? `<div class="keys">${keys.map(k => `<div class="key${k.ligado ? '' : ' off'}"><span>${esc(k.rotulo || k.nome || '')}</span>${pill(k.ligado)}</div>`).join('')}</div>` : '');
+  const group = (name, title, contents) => `<fieldset class="setting-group"><legend>${title}</legend><form data-group="${name}">${contents}<div><button type="submit">Salvar</button></div></form></fieldset>`;
+  el.innerHTML = `<div class="settings">
+    <div class="setting"><label for="brilho">Brilho</label><div class="brightness"><input id="brilho" type="range" min="0" max="100" step="1" value="${esc(c.brilho ?? 0)}" ${c.brilho == null ? 'disabled' : ''}><output for="brilho">${esc(c.brilho ?? '–')}%</output></div></div>
+    ${rows.map(([name, label, entries]) => `<div class="setting"><label for="cfg-${name}">${label}</label>${selectControl(name, c[name], entries, `id="cfg-${name}" data-setting ${c[name] == null || !entries.length ? 'disabled' : ''}`)}</div>`).join('')}
+    ${m ? group('metas', 'Metas', `<div class="fields">${numberControl('passos', 'Passos', m.passos, 1000, 50000, 100)}${numberControl('kcal', 'kcal', m.kcal, 50, 3000)}${numberControl('minutos', 'Minutos ativos', m.minutos, 5, 300)}</div>`) : ''}
+    ${sed ? group('sedentario', 'Lembrete de sedentarismo', `<div class="setting"><span>Ligado</span>${switchControl('ligado', sed.ligado, 'Ativar lembrete de sedentarismo')}</div><label>Intervalo ${selectControl('intervalo_min', sed.intervalo_min, intervals(opcoes.intervalos_sedentario))}</label><div class="fields"><label>Início<input type="time" name="inicio" value="${esc(sed.inicio)}" required></label><label>Fim<input type="time" name="fim" value="${esc(sed.fim)}" required></label></div>`) : ''}
+    ${bpm ? group('alarme_bpm', 'Alerta de batimento', `<div class="setting"><span>Ligado</span>${switchControl('ligado', bpm.ligado, 'Ativar alerta de batimento')}</div><div class="fields">${numberControl('alto', 'Alto (bpm)', bpm.alto, 100, 200)}${numberControl('baixo', 'Baixo (bpm)', bpm.baixo, 30, 60)}</div>`) : ''}
+    </div>`
+    + (keys.length ? `<div class="keys">${keys.map(k => `<div class="key${k.ligado ? '' : ' off'}"><span>${esc(k.rotulo || k.nome || '')}</span>${switchControl('chave', k.ligado, k.rotulo || k.nome || `Chave ${k.bit}`, `data-bit="${esc(k.bit)}"`)}</div>`).join('')}</div>` : '');
+  el.querySelectorAll('[data-setting]').forEach(s => s.onchange = () => adjust(s.name, s.name === 'unidade' ? s.value : Number(s.value)));
+  el.querySelectorAll('[data-bit]').forEach(s => s.onchange = () => adjust('chave', { bit: Number(s.dataset.bit), ligado: s.checked }));
+  const brightness = el.querySelector('#brilho');
+  brightness.oninput = () => { el.querySelector('output').textContent = `${brightness.value}%`; };
+  brightness.onchange = () => adjust('brilho', Number(brightness.value));
+  el.querySelectorAll('[data-group]').forEach(form => {
+    const name = form.dataset.group;
+    form.oninput = () => drafts.set(name, formValues(form));
+    form.onsubmit = e => { e.preventDefault(); adjust(name, formValues(form), name); };
+    form.querySelectorAll('select, input[type=checkbox]').forEach(s => s.onchange = () => {
+      // O ajuste imediato preserva os outros valores já confirmados no relógio.
+      adjust(name, { ...c[name], [s.name]: s.type === 'checkbox' ? s.checked : Number(s.value) }, name);
+    });
+  });
 }
 
 function drawDevice() {
@@ -475,11 +590,13 @@ function render() {
   if (!data) return;
   $('#dias').value = data.dias;
   drawKpis(); drawSteps(); drawHr(); drawSpo2(); drawStress(); drawSleep(); drawDays(); drawAlarms(); drawConfig(); drawDevice();
+  if (running) busy(true);
 }
 
 async function read() {
   await run('Lendo o relógio… (leva uns 10–30 s; o Bluetooth do celular precisa estar desligado)', async () => {
     data = await api(`/api/dados?dias=${$('#dias').value}`);
+    drafts.clear(); editingAlarms.clear();
     render();
     setStatus(`Leitura concluída às ${fmtH(data.lido_em)}: ${data.passos.length} registros de passos, ${data.batimentos.length} batimentos, ${(data.spo2 || []).length} de SpO2, ${(data.estresse || []).length} de estresse, ${data.sono.length} pontos de sono.`, 'ok');
   });
@@ -500,15 +617,7 @@ form.onsubmit = e => {
   });
 };
 
-$('#aplicar').onclick = () => {
-  const minutos = Number($('#intervalo').value);
-  run('Alterando o intervalo de medição…', async () => {
-    const r = await api('/api/intervalo', { minutos });
-    if (data) data.intervalo_bpm = r.intervalo_bpm; else $('#int-atual').textContent = `${r.intervalo_bpm} min`;
-    render();
-    setStatus(`Intervalo de batimentos agora: ${r.intervalo_bpm === 0 ? 'desligado' : r.intervalo_bpm + ' min'}.`, 'ok');
-  });
-};
+$('#intervalo').onchange = () => adjust('intervalo_bpm', Number($('#intervalo').value));
 
 $('#tema').onclick = () => {
   const root = document.documentElement, dark = matchMedia('(prefers-color-scheme: dark)').matches;
@@ -525,8 +634,9 @@ addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(r
 (async () => {
   try {
     const cfg = await api('/api/config');
+    opcoes = cfg.opcoes || {};
     $('#tipo').innerHTML = cfg.tipos.map(t => `<option ${t === 'sms' ? 'selected' : ''}>${t}</option>`).join('');
-    $('#intervalo').innerHTML = cfg.intervalos.map(m => `<option value="${m}">${m === 0 ? 'desligado' : m + ' min'}</option>`).join('');
+    $('#intervalo').innerHTML = '<option value="" disabled>Não lido</option>' + [0, 3, 10].map(m => `<option value="${m}">${m === 0 ? 'desligado' : m + ' min'}</option>`).join('');
     if (cfg.ultimo) { data = cfg.ultimo; render(); setStatus(`Mostrando a última leitura (${fmtDH(data.lido_em)}).`); }
     else read();
   } catch (e) { setStatus(`Servidor do painel não respondeu: ${e.message}`, 'err'); }
