@@ -1,0 +1,14 @@
+# Material de pesquisa: APK e código de terceiros não vão para o repositório
+research/
+
+# Configuração local (MAC do relógio etc.) — modelo em .env.example
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Sistema
+.DS_Store
+Thumbs.db
