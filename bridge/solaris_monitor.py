@@ -22,6 +22,7 @@ DATA2_READ = "00008004-0000-1000-8000-00805f9b34fb"  # pushes do relógio (o SDK
 SESSIONS_DIR = Path(__file__).with_name("sessoes")
 SWITCH_BITS = (16, 18, 21, 26, 29)  # FC em tempo real, monitor de FC, cansaço, estresse, SpO2 contínuo
 WORKOUT_FREE = 22
+MAX_RECONNECTS = 20
 HIST_STEPS, HIST_STRESS, HIST_SPO2 = 1, 5, 6
 
 
@@ -56,6 +57,7 @@ class Monitor:
 
     def start(self, minutes: int) -> None:
         self.stop_event.clear()
+        self.drops = 0
         now = time.time()
         self.session = {"estado": "conectando", "inicio": now, "fim_previsto": now + minutes * 60,
                         "minutos": minutes, "eventos": [], "erro": None, "arquivo": None}
@@ -103,6 +105,9 @@ class Monitor:
 
     async def _poll_history(self, link: Link, seen: dict, since: int) -> None:
         end = int(time.time())
+        bat = await self._get(link, 0x08, b"\x01")  # o push de bateria só vem quando o nível muda
+        if len(bat) >= 2:
+            self.emit("bateria", valor=bat[1], carregando=bat[0] == 1)
         for kind, field, name in ((HIST_SPO2, 11, "spo2"), (HIST_STRESS, 10, "estresse")):
             for p in await link.history(kind, since, end):
                 if p.get(field) and p["t"] not in seen[name]:
@@ -116,6 +121,29 @@ class Monitor:
     async def _run(self) -> None:
         s = self.session
         saved: dict = {}
+        state = {"seen": {"spo2": set(), "estresse": set()}, "last_bpm": None, "next_history": 0.0}
+        try:
+            while not await self._connection(saved, state):
+                pass
+        except Exception as e:  # desistiu de reconectar: tenta ao menos restaurar numa conexão nova
+            s["erro"] = str(e) or type(e).__name__
+            self.emit("erro", texto=s["erro"])
+            if saved:
+                await self._restore_reconnecting(saved)
+        finally:
+            s["estado"] = "concluido" if not s["erro"] else "erro"
+            s["encerrado_em"] = time.time()
+            self.emit("fim")
+            self._save()
+
+    def _over(self) -> bool:
+        s = self.session
+        return s["estado"] != "conectando" and (time.time() >= s["fim_previsto"] or self.stop_event.is_set())
+
+    async def _connection(self, saved: dict, state: dict) -> bool:
+        """Uma conexão da sessão. Devolve True quando a sessão acabou e foi restaurada;
+        False se a conexão caiu e vale tentar de novo (até MAX_RECONNECTS vezes)."""
+        s = self.session
         try:
             dev = None
             for attempt in range(3):  # a busca BLE no Windows às vezes não acha o relógio na primeira
@@ -130,58 +158,59 @@ class Monitor:
                 await client.start_notify(DATA1_READ, link.on_notify)
                 await client.start_notify(DATA2_READ, self._on_push)
 
-                # guarda o estado atual para restaurar no fim
-                saved["fc"] = (await self._get(link, 0x5C, b"\x00"))[:1]
-                saved["spo2"] = dict(parse_tlv(await self._get(link, 0x63, b"\x01"))).get(1, b"")[:1]
-                saved["estresse"] = dict(parse_tlv(await self._get(link, 0x63, b"\x02"))).get(2, b"")[:1]
-                mask = await self._get(link, 0x90, b"\x00")
-                saved["chaves"] = le_int(mask[:4]) if len(mask) >= 4 else None
-                self.emit("aviso", texto="estado atual dos sensores guardado")
+                if not saved:  # só na primeira conexão: estado a restaurar no fim
+                    saved["fc"] = (await self._get(link, 0x5C, b"\x00"))[:1]
+                    saved["spo2"] = dict(parse_tlv(await self._get(link, 0x63, b"\x01"))).get(1, b"")[:1]
+                    saved["estresse"] = dict(parse_tlv(await self._get(link, 0x63, b"\x02"))).get(2, b"")[:1]
+                    mask = await self._get(link, 0x90, b"\x00")
+                    saved["chaves"] = le_int(mask[:4]) if len(mask) >= 4 else None
+                    self.emit("aviso", texto="estado atual dos sensores guardado")
 
-                for bit in SWITCH_BITS:
-                    await self._set(client, link, 0x90, bytes([1, bit, 1]))
-                await self._set(client, link, 0x5C, b"\x01")
-                await self._set(client, link, 0x63, b"\x01\x01\x01")
-                await self._set(client, link, 0x63, b"\x02\x01\x01")
-                saved["treino"] = await self._set(client, link, 0x6E, bytes([1, 1, 1, 0, 1, WORKOUT_FREE]))
-                self.emit("aviso", texto="sensores no máximo e treino livre iniciado")
+                if not self._over():
+                    for bit in SWITCH_BITS:
+                        await self._set(client, link, 0x90, bytes([1, bit, 1]))
+                    await self._set(client, link, 0x5C, b"\x01")
+                    await self._set(client, link, 0x63, b"\x01\x01\x01")
+                    await self._set(client, link, 0x63, b"\x02\x01\x01")
+                    running = dict(parse_tlv(await self._get(link, 0x41, b"\x00"))).get(0, b"\x00")[:1] == b"\x01"
+                    if not running and await self._set(client, link, 0x6E, bytes([1, 1, 1, 0, 1, WORKOUT_FREE])):
+                        saved["treino"] = True
+                    if s["estado"] == "conectando":
+                        s["estado"] = "monitorando"
+                        s["inicio"] = time.time()
+                        s["fim_previsto"] = s["inicio"] + s["minutos"] * 60
+                        self.emit("aviso", texto="sensores no máximo e treino livre iniciado")
+                        self.emit("inicio", fim_previsto=s["fim_previsto"])
+                    else:
+                        self.emit("aviso", texto="reconectado; sensores e treino religados")
 
-                s["estado"] = "monitorando"
-                s["inicio"] = time.time()
-                s["fim_previsto"] = s["inicio"] + s["minutos"] * 60
-                self.emit("inicio", fim_previsto=s["fim_previsto"])
-
-                seen = {"spo2": set(), "estresse": set()}
                 since = int(s["inicio"]) - 600
-                last_bpm_t, next_history = None, 0.0
-                while time.time() < s["fim_previsto"] and not self.stop_event.is_set():
+                while not self._over():
                     if not client.is_connected:
                         raise RuntimeError("A conexão com o relógio caiu.")
                     b = await self._get(link, 0x62, b"\x01")
-                    if len(b) >= 7 and (le_int(b[2:6]), b[6]) != last_bpm_t:
-                        last_bpm_t = (le_int(b[2:6]), b[6])
-                        self.emit("bpm", valor=b[6], fonte="consulta", t=last_bpm_t[0])
-                    if time.time() >= next_history:
-                        await self._poll_history(link, seen, since)
-                        next_history = time.time() + 60
+                    if len(b) >= 7 and (le_int(b[2:6]), b[6]) != state["last_bpm"]:
+                        state["last_bpm"] = (le_int(b[2:6]), b[6])
+                        self.emit("bpm", valor=b[6], fonte="consulta", t=state["last_bpm"][0])
+                    if time.time() >= state["next_history"]:
+                        await self._poll_history(link, state["seen"], since)
+                        state["next_history"] = time.time() + 60
                     try:
                         await asyncio.wait_for(self.stop_event.wait(), 5)
                     except asyncio.TimeoutError:
                         pass
 
                 s["estado"] = "restaurando"
-                await self._poll_history(link, seen, since)
+                await self._poll_history(link, state["seen"], since)
                 await self._restore(client, link, saved)
-        except Exception as e:  # erro de BLE: tenta ao menos restaurar numa conexão nova
-            s["erro"] = str(e) or type(e).__name__
-            self.emit("erro", texto=s["erro"])
-            if saved:
-                await self._restore_reconnecting(saved)
-        finally:
-            s["estado"] = "concluido" if not s["erro"] else "erro"
-            s["encerrado_em"] = time.time()
-            self.emit("fim")
-            self._save()
+                return True
+        except Exception as e:
+            self.drops = getattr(self, "drops", 0) + 1
+            if self.drops > MAX_RECONNECTS:
+                raise RuntimeError(f"A conexão caiu {self.drops} vezes; sessão encerrada.") from e
+            self.emit("aviso", texto=f"conexão caiu ({e or type(e).__name__}); reconectando ({self.drops}/{MAX_RECONNECTS})…")
+            await asyncio.sleep(3)
+            return False
 
     async def _restore(self, client: BleakClient, link: Link, saved: dict) -> None:
         if saved.get("treino"):
