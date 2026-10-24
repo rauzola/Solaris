@@ -351,7 +351,10 @@ def make_app(watch: Watch) -> web.Application:
         return web.json_response(await watch.adjust("intervalo_bpm", (await req.json()).get("minutos")))
 
     async def ajuste(req: web.Request):
-        body = await req.json()
+        try:
+            body = await req.json()
+        except ValueError:  # JSON inválido ou fora de UTF-8: nada é enviado ao relógio
+            raise web.HTTPBadRequest(text="Pedido inválido: envie JSON em UTF-8.")
         return web.json_response(await watch.adjust(str(body.get("campo")), body.get("valor")))
 
     @web.middleware
