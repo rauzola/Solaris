@@ -13,6 +13,8 @@ Uso:
 """
 
 import argparse
+import asyncio
+import json
 import time
 import traceback
 import webbrowser
@@ -27,9 +29,11 @@ from solaris_read import (
     DATA1_READ, DATA_SERVICE, EOF, HIST_HR, HIST_SLEEP, HIST_STEPS, SOF, WATCH_ADDRESS,
     Link, device_info, find, history_range, le_int, parse_tlv,
 )
+from solaris_monitor import Monitor
 from solaris_notify import CMD_PUSH_MESSAGE, SET, TYPES, build_message, send
 
 PAGE = Path(__file__).with_name("painel.html")
+MONITOR_PAGE = Path(__file__).with_name("monitor.html")
 CMD_BATTERY, CMD_DEVICE_INFO, CMD_HR_INTERVAL, CMD_ACK = 0x08, 0x03, 0x5C, 0x01
 CMD_NEWEST_HR, CMD_HEALTH_CFG, CMD_ALARMS = 0x62, 0x63, 0x9C
 HIST_STRESS, HIST_SPO2 = 5, 6
@@ -250,10 +254,13 @@ class Watch:
         self.timeout = timeout
         self.busy = False
         self.last: dict | None = None
+        self.monitor = Monitor(address, timeout)
 
     @asynccontextmanager
     async def connect(self):
         """Uma conexão por vez; quem chega enquanto outra está aberta recebe 409."""
+        if self.monitor.running:
+            raise web.HTTPConflict(text="Há um monitoramento de saúde em andamento. Pare-o antes de usar o painel.")
         if self.busy:
             raise web.HTTPConflict(text="O painel já está falando com o relógio. Espere terminar.")
         self.busy = True
@@ -359,6 +366,46 @@ def make_app(watch: Watch) -> web.Application:
             raise web.HTTPBadRequest(text="Pedido inválido: envie JSON em UTF-8.")
         return web.json_response(await watch.adjust(str(body.get("campo")), body.get("valor")))
 
+    monitor = watch.monitor
+
+    async def monitor_page(_):
+        return web.FileResponse(MONITOR_PAGE)
+
+    async def monitor_start(req: web.Request):
+        minutes = (await req.json()).get("minutos", 60)
+        if not isinstance(minutes, int) or not 1 <= minutes <= 120:
+            raise web.HTTPBadRequest(text="Duração: 1 a 120 minutos.")
+        if monitor.running or watch.busy:
+            raise web.HTTPConflict(text="O relógio já está em uso. Espere terminar.")
+        monitor.start(minutes)
+        return web.json_response(monitor.summary())
+
+    async def monitor_stop(_):
+        monitor.stop()
+        return web.json_response({"ok": True})
+
+    async def monitor_state(_):
+        return web.json_response(monitor.summary())
+
+    async def monitor_events(req: web.Request):
+        """Server-Sent Events: um evento JSON por linha `data:` enquanto a página estiver aberta."""
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        await resp.prepare(req)
+        q: asyncio.Queue = asyncio.Queue()
+        monitor.listeners.add(q)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), 15)
+                    await resp.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
+                except asyncio.TimeoutError:
+                    await resp.write(b": ping\n\n")
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            monitor.listeners.discard(q)
+        return resp
+
     @web.middleware
     async def errors(req: web.Request, handler):
         try:
@@ -377,6 +424,11 @@ def make_app(watch: Watch) -> web.Application:
         web.post("/api/notificar", notificar),
         web.post("/api/intervalo", intervalo),
         web.post("/api/ajuste", ajuste),
+        web.get("/monitor", monitor_page),
+        web.post("/api/monitor/iniciar", monitor_start),
+        web.post("/api/monitor/parar", monitor_stop),
+        web.get("/api/monitor/estado", monitor_state),
+        web.get("/api/monitor/eventos", monitor_events),
     ])
     return app
 

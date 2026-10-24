@@ -1,0 +1,215 @@
+"""Sessão de monitoramento de saúde ao vivo (usada pelo painel).
+
+Mantém a conexão BLE aberta pela sessão inteira, liga os sensores de saúde no máximo, inicia um treino livre
+(é o único modo em que o relógio atualiza o batimento a cada ~15 s) e junta três fontes:
+- pushes no canal 8004 (cmd 0xE0 saúde, 0xE3 bateria, 0xE4 treino, 0xD8 eventos);
+- consulta do último batimento (0x62) a cada 5 s;
+- histórico 0xBE de SpO2, estresse e passos dos últimos minutos, a cada 60 s.
+No fim (tempo esgotado, parada manual ou erro) restaura tudo que foi alterado e salva a sessão em JSON.
+"""
+
+import asyncio
+import json
+import time
+from pathlib import Path
+
+from bleak import BleakClient
+
+from solaris_notify import SET, send
+from solaris_read import DATA1_READ, EOF, SOF, Link, find, le_int, parse_tlv
+
+DATA2_READ = "00008004-0000-1000-8000-00805f9b34fb"  # pushes do relógio (o SDK só trata eventos neste canal)
+SESSIONS_DIR = Path(__file__).with_name("sessoes")
+SWITCH_BITS = (16, 18, 21, 26, 29)  # FC em tempo real, monitor de FC, cansaço, estresse, SpO2 contínuo
+WORKOUT_FREE = 22
+HIST_STEPS, HIST_STRESS, HIST_SPO2 = 1, 5, 6
+
+
+class Monitor:
+    def __init__(self, address: str | None, timeout: float) -> None:
+        self.address = address
+        self.timeout = timeout
+        self.task: asyncio.Task | None = None
+        self.stop_event = asyncio.Event()
+        self.listeners: set[asyncio.Queue] = set()
+        self.session: dict | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    # ---- eventos para o navegador
+
+    def emit(self, kind: str, **data) -> None:
+        event = {"tipo": kind, "s": round(time.time() - self.session["inicio"], 1), **data}
+        self.session["eventos"].append(event)
+        for q in self.listeners:
+            q.put_nowait(event)
+
+    def summary(self) -> dict:
+        s = self.session
+        if not s:
+            return {"estado": "parado"}
+        return {k: v for k, v in s.items() if k != "eventos"} | {"eventos": s["eventos"]}
+
+    # ---- controle
+
+    def start(self, minutes: int) -> None:
+        self.stop_event.clear()
+        now = time.time()
+        self.session = {"estado": "conectando", "inicio": now, "fim_previsto": now + minutes * 60,
+                        "minutos": minutes, "eventos": [], "erro": None, "arquivo": None}
+        self.task = asyncio.create_task(self._run())
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    async def _set(self, client: BleakClient, link: Link, cmd: int, payload: bytes) -> bool:
+        pkt = bytes([SOF, cmd, SET]) + len(payload).to_bytes(2, "little") + payload + bytes([EOF])
+        ack = await send(client, link, pkt)
+        return bool(ack and len(ack) >= 7 and ack[1] == 0x01 and ack[5] == cmd and ack[6] == 0)
+
+    async def _get(self, link: Link, cmd: int, payload: bytes) -> bytes:
+        bodies = await link.request(cmd, payload)
+        return bodies[0] if bodies else b""
+
+    def _on_push(self, _char, data: bytearray) -> None:
+        b = bytes(data)
+        if len(b) < 7 or b[0] != SOF:
+            return
+        cmd, tlv = b[1], dict(parse_tlv(b[5:-1]))
+        if cmd == 0xE0:
+            if tlv.get(1):
+                self.emit("bpm", valor=tlv[1][0], fonte="push")
+            if tlv.get(2):
+                self.emit("estresse", valor=tlv[2][0], fonte="push")
+            if tlv.get(3):
+                self.emit("spo2", valor=tlv[3][0], fonte="push")
+            if tlv.get(17) and len(tlv[17]) >= 1:
+                self.emit("spo2", valor=tlv[17][0], fonte="push")
+            if tlv.get(11) and len(tlv[11]) >= 12:
+                v = tlv[11]
+                self.emit("atividade", passos=le_int(v[0:4]), metros=le_int(v[4:8]), kcal=le_int(v[8:12]) / 1000)
+            if tlv.get(12):
+                self.emit("bateria", valor=tlv[12][0])
+        elif cmd == 0xE3 and len(b) >= 8:
+            self.emit("bateria", valor=b[6], carregando=b[5] == 1)
+        elif cmd == 0xE4 and tlv.get(7) and tlv[7][0]:
+            self.emit("bpm", valor=tlv[7][0], fonte="treino")
+        elif cmd == 0xD8 and tlv.get(0):
+            names = {0x09: "falha ao medir FC", 0x0C: "treino iniciado", 0x0D: "treino encerrado",
+                     0x0E: "medição de SpO2 iniciada", 0x0F: "medição de SpO2 encerrada"}
+            self.emit("aviso", texto=names.get(tlv[0][0], f"evento {tlv[0][0]:02X}"))
+
+    async def _poll_history(self, link: Link, seen: dict, since: int) -> None:
+        end = int(time.time())
+        for kind, field, name in ((HIST_SPO2, 11, "spo2"), (HIST_STRESS, 10, "estresse")):
+            for p in await link.history(kind, since, end):
+                if p.get(field) and p["t"] not in seen[name]:
+                    seen[name].add(p["t"])
+                    self.emit(name, valor=p[field], fonte="histórico", t=p["t"])
+        steps = await link.history(HIST_STEPS, int(self.session["inicio"]), end)
+        if steps:
+            self.emit("passos", total=sum(p.get(3, 0) for p in steps), kcal=sum(p.get(4, 0) for p in steps) / 1000,
+                      metros=sum(p.get(5, 0) for p in steps))
+
+    async def _run(self) -> None:
+        s = self.session
+        saved: dict = {}
+        try:
+            dev = None
+            for attempt in range(3):  # a busca BLE no Windows às vezes não acha o relógio na primeira
+                dev = await find(self.address, max(self.timeout, 30))
+                if dev:
+                    break
+                self.emit("aviso", texto=f"relógio não encontrado (tentativa {attempt + 1} de 3)")
+            if not dev:
+                raise RuntimeError("Relógio não encontrado. Desligue o Bluetooth do celular e tente de novo.")
+            async with BleakClient(dev) as client:
+                link = Link(client, raw=False)
+                await client.start_notify(DATA1_READ, link.on_notify)
+                await client.start_notify(DATA2_READ, self._on_push)
+
+                # guarda o estado atual para restaurar no fim
+                saved["fc"] = (await self._get(link, 0x5C, b"\x00"))[:1]
+                saved["spo2"] = dict(parse_tlv(await self._get(link, 0x63, b"\x01"))).get(1, b"")[:1]
+                saved["estresse"] = dict(parse_tlv(await self._get(link, 0x63, b"\x02"))).get(2, b"")[:1]
+                mask = await self._get(link, 0x90, b"\x00")
+                saved["chaves"] = le_int(mask[:4]) if len(mask) >= 4 else None
+                self.emit("aviso", texto="estado atual dos sensores guardado")
+
+                for bit in SWITCH_BITS:
+                    await self._set(client, link, 0x90, bytes([1, bit, 1]))
+                await self._set(client, link, 0x5C, b"\x01")
+                await self._set(client, link, 0x63, b"\x01\x01\x01")
+                await self._set(client, link, 0x63, b"\x02\x01\x01")
+                saved["treino"] = await self._set(client, link, 0x6E, bytes([1, 1, 1, 0, 1, WORKOUT_FREE]))
+                self.emit("aviso", texto="sensores no máximo e treino livre iniciado")
+
+                s["estado"] = "monitorando"
+                s["inicio"] = time.time()
+                s["fim_previsto"] = s["inicio"] + s["minutos"] * 60
+                self.emit("inicio", fim_previsto=s["fim_previsto"])
+
+                seen = {"spo2": set(), "estresse": set()}
+                since = int(s["inicio"]) - 600
+                last_bpm_t, next_history = None, 0.0
+                while time.time() < s["fim_previsto"] and not self.stop_event.is_set():
+                    if not client.is_connected:
+                        raise RuntimeError("A conexão com o relógio caiu.")
+                    b = await self._get(link, 0x62, b"\x01")
+                    if len(b) >= 7 and (le_int(b[2:6]), b[6]) != last_bpm_t:
+                        last_bpm_t = (le_int(b[2:6]), b[6])
+                        self.emit("bpm", valor=b[6], fonte="consulta", t=last_bpm_t[0])
+                    if time.time() >= next_history:
+                        await self._poll_history(link, seen, since)
+                        next_history = time.time() + 60
+                    try:
+                        await asyncio.wait_for(self.stop_event.wait(), 5)
+                    except asyncio.TimeoutError:
+                        pass
+
+                s["estado"] = "restaurando"
+                await self._poll_history(link, seen, since)
+                await self._restore(client, link, saved)
+        except Exception as e:  # erro de BLE: tenta ao menos restaurar numa conexão nova
+            s["erro"] = str(e) or type(e).__name__
+            self.emit("erro", texto=s["erro"])
+            if saved:
+                await self._restore_reconnecting(saved)
+        finally:
+            s["estado"] = "concluido" if not s["erro"] else "erro"
+            s["encerrado_em"] = time.time()
+            self.emit("fim")
+            self._save()
+
+    async def _restore(self, client: BleakClient, link: Link, saved: dict) -> None:
+        if saved.get("treino"):
+            await self._set(client, link, 0x6E, bytes([1, 1, 3]))
+        if saved.get("fc"):
+            await self._set(client, link, 0x5C, saved["fc"])
+        if saved.get("spo2"):
+            await self._set(client, link, 0x63, b"\x01\x01" + saved["spo2"])
+        if saved.get("estresse"):
+            await self._set(client, link, 0x63, b"\x02\x01" + saved["estresse"])
+        if saved.get("chaves") is not None:
+            for bit in SWITCH_BITS:
+                await self._set(client, link, 0x90, bytes([1, bit, saved["chaves"] >> bit & 1]))
+        self.emit("aviso", texto="sensores restaurados ao estado anterior")
+
+    async def _restore_reconnecting(self, saved: dict) -> None:
+        try:
+            dev = await find(self.address, self.timeout)
+            if dev:
+                async with BleakClient(dev) as client:
+                    link = Link(client, raw=False)
+                    await client.start_notify(DATA1_READ, link.on_notify)
+                    await self._restore(client, link, saved)
+        except Exception as e:
+            self.emit("erro", texto=f"Não consegui restaurar os sensores: {e}. Use a aba de ajustes.")
+
+    def _save(self) -> None:
+        SESSIONS_DIR.mkdir(exist_ok=True)
+        path = SESSIONS_DIR / time.strftime("sessao-%Y%m%d-%H%M%S.json", time.localtime(self.session["inicio"]))
+        self.session["arquivo"] = path.name
+        path.write_text(json.dumps(self.session, ensure_ascii=False, indent=1), encoding="utf-8")

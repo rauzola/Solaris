@@ -12,3 +12,6 @@ __pycache__/
 # Sistema
 .DS_Store
 Thumbs.db
+
+# Sessões de monitoramento (dados de saúde pessoais)
+bridge/sessoes/
