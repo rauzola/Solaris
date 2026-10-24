@@ -372,12 +372,15 @@ def make_app(watch: Watch) -> web.Application:
         return web.FileResponse(MONITOR_PAGE)
 
     async def monitor_start(req: web.Request):
-        minutes = (await req.json()).get("minutos", 60)
+        body = await req.json()
+        minutes, mode = body.get("minutos", 60), body.get("modo", "completo")
         if not isinstance(minutes, int) or not 1 <= minutes <= 120:
             raise web.HTTPBadRequest(text="Duração: 1 a 120 minutos.")
+        if mode not in ("completo", "batimento"):
+            raise web.HTTPBadRequest(text="Modo: completo ou batimento.")
         if monitor.running or watch.busy:
             raise web.HTTPConflict(text="O relógio já está em uso. Espere terminar.")
-        monitor.start(minutes)
+        monitor.start(minutes, mode)
         return web.json_response(monitor.summary())
 
     async def monitor_stop(_):

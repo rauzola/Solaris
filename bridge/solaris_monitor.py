@@ -33,7 +33,16 @@ class Monitor:
         self.task: asyncio.Task | None = None
         self.stop_event = asyncio.Event()
         self.listeners: set[asyncio.Queue] = set()
-        self.session: dict | None = None
+        self.session: dict | None = self._load_last()
+
+    @staticmethod
+    def _load_last() -> dict | None:
+        """Última sessão salva, para a página mostrar algo logo depois de o painel reiniciar."""
+        files = sorted(SESSIONS_DIR.glob("sessao-*.json"))
+        try:
+            return json.loads(files[-1].read_text(encoding="utf-8")) if files else None
+        except (OSError, ValueError):
+            return None
 
     @property
     def running(self) -> bool:
@@ -55,11 +64,13 @@ class Monitor:
 
     # ---- controle
 
-    def start(self, minutes: int) -> None:
+    def start(self, minutes: int, mode: str = "completo") -> None:
+        """Modos: "completo" = SpO2 e estresse a cada ~3 min e batimento a cada ~1 min (sem treino, que bloqueia SpO2);
+        "batimento" = treino livre, batimento a cada ~5 s, sem SpO2/estresse."""
         self.stop_event.clear()
         self.drops = 0
         now = time.time()
-        self.session = {"estado": "conectando", "inicio": now, "fim_previsto": now + minutes * 60,
+        self.session = {"estado": "conectando", "inicio": now, "fim_previsto": now + minutes * 60, "modo": mode,
                         "minutos": minutes, "eventos": [], "erro": None, "arquivo": None}
         self.task = asyncio.create_task(self._run())
 
@@ -87,8 +98,8 @@ class Monitor:
                 self.emit("estresse", valor=tlv[2][0], fonte="push")
             if tlv.get(3):
                 self.emit("spo2", valor=tlv[3][0], fonte="push")
-            if tlv.get(17) and len(tlv[17]) >= 1:
-                self.emit("spo2", valor=tlv[17][0], fonte="push")
+            if tlv.get(17) and len(tlv[17]) >= 5:  # resultado da medição sob demanda: [spo2][epoch 4B]
+                self.emit("spo2", valor=tlv[17][0], fonte="medição", t=le_int(tlv[17][1:5]))
             if tlv.get(11) and len(tlv[11]) >= 12:
                 v = tlv[11]
                 self.emit("atividade", passos=le_int(v[0:4]), metros=le_int(v[4:8]), kcal=le_int(v[8:12]) / 1000)
@@ -102,6 +113,17 @@ class Monitor:
             names = {0x09: "falha ao medir FC", 0x0C: "treino iniciado", 0x0D: "treino encerrado",
                      0x0E: "medição de SpO2 iniciada", 0x0F: "medição de SpO2 encerrada"}
             self.emit("aviso", texto=names.get(tlv[0][0], f"evento {tlv[0][0]:02X}"))
+
+    async def _emit_last_known(self, link: Link) -> None:
+        """Última leitura das 3 horas anteriores, para a página não começar vazia (não entra nas estatísticas)."""
+        end = int(self.session["inicio"])
+        for kind, field, name in ((HIST_SPO2, 11, "spo2"), (HIST_STRESS, 10, "estresse")):
+            points = [p for p in await link.history(kind, end - 3 * 3600, end) if p.get(field)]
+            if points:
+                self.emit(name, valor=points[-1][field], fonte="anterior", t=points[-1]["t"])
+        b = await self._get(link, 0x62, b"\x01")
+        if len(b) >= 7:
+            self.emit("bpm", valor=b[6], fonte="anterior", t=le_int(b[2:6]))
 
     async def _poll_history(self, link: Link, seen: dict, since: int) -> None:
         end = int(time.time())
@@ -164,27 +186,38 @@ class Monitor:
                     saved["estresse"] = dict(parse_tlv(await self._get(link, 0x63, b"\x02"))).get(2, b"")[:1]
                     mask = await self._get(link, 0x90, b"\x00")
                     saved["chaves"] = le_int(mask[:4]) if len(mask) >= 4 else None
+                    s["estado_original"] = {k: (v.hex() if isinstance(v, bytes) else v) for k, v in saved.items()}
                     self.emit("aviso", texto="estado atual dos sensores guardado")
 
+                full = s["modo"] == "completo"
                 if not self._over():
+                    await self._set(client, link, 0x19, b"\x03\x01\x01")  # app em primeiro plano
                     for bit in SWITCH_BITS:
                         await self._set(client, link, 0x90, bytes([1, bit, 1]))
                     await self._set(client, link, 0x5C, b"\x01")
-                    await self._set(client, link, 0x63, b"\x01\x01\x01")
-                    await self._set(client, link, 0x63, b"\x02\x01\x01")
+                    # a cada 3 min (testado); religar as chaves faz o relógio reagendar já com o novo intervalo
+                    minutes = 3 if full else 1
+                    await self._set(client, link, 0x63, bytes([1, 1, minutes]))
+                    await self._set(client, link, 0x63, bytes([2, 1, minutes]))
+                    if full:
+                        for bit in (29, 21, 26):
+                            await self._set(client, link, 0x90, bytes([1, bit, 0]))
+                            await self._set(client, link, 0x90, bytes([1, bit, 1]))
                     running = dict(parse_tlv(await self._get(link, 0x41, b"\x00"))).get(0, b"\x00")[:1] == b"\x01"
-                    if not running and await self._set(client, link, 0x6E, bytes([1, 1, 1, 0, 1, WORKOUT_FREE])):
+                    if not full and not running and await self._set(client, link, 0x6E, bytes([1, 1, 1, 0, 1, WORKOUT_FREE])):
                         saved["treino"] = True
                     if s["estado"] == "conectando":
                         s["estado"] = "monitorando"
                         s["inicio"] = time.time()
                         s["fim_previsto"] = s["inicio"] + s["minutos"] * 60
-                        self.emit("aviso", texto="sensores no máximo e treino livre iniciado")
+                        self.emit("aviso", texto="sensores no máximo; SpO2 e estresse a cada 3 min" if full
+                                  else "sensores no máximo e treino livre iniciado (batimento a cada ~5 s)")
                         self.emit("inicio", fim_previsto=s["fim_previsto"])
+                        await self._emit_last_known(link)
                     else:
-                        self.emit("aviso", texto="reconectado; sensores e treino religados")
+                        self.emit("aviso", texto="reconectado; sensores religados")
 
-                since = int(s["inicio"]) - 600
+                since = int(s["inicio"])  # o que veio antes já foi enviado como "anterior"
                 while not self._over():
                     if not client.is_connected:
                         raise RuntimeError("A conexão com o relógio caiu.")
@@ -195,6 +228,11 @@ class Monitor:
                     if time.time() >= state["next_history"]:
                         await self._poll_history(link, state["seen"], since)
                         state["next_history"] = time.time() + 60
+                    if full and time.time() >= state.get("next_spo2", 0):
+                        # medição sob demanda: o resultado chega por push 0xE0 TLV 17 em ~20 s
+                        if await self._set(client, link, 0x1A, b"\x27"):
+                            self.emit("aviso", texto="medindo SpO2")
+                        state["next_spo2"] = time.time() + 180
                     try:
                         await asyncio.wait_for(self.stop_event.wait(), 5)
                     except asyncio.TimeoutError:
@@ -215,6 +253,7 @@ class Monitor:
     async def _restore(self, client: BleakClient, link: Link, saved: dict) -> None:
         if saved.get("treino"):
             await self._set(client, link, 0x6E, bytes([1, 1, 3]))
+        await self._set(client, link, 0x1A, b"\x28")  # encerra medição de SpO2 que esteja em curso
         if saved.get("fc"):
             await self._set(client, link, 0x5C, saved["fc"])
         if saved.get("spo2"):

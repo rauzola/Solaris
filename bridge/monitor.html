@@ -70,7 +70,11 @@ progress::-moz-progress-bar { background: var(--accent); }
 .chart .grid-l { stroke: var(--line); }
 .chart .ax { fill: var(--muted); font-size: 11px; }
 .chart .guide { stroke: var(--muted); stroke-dasharray: 3 3; }
-.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -110%); display: none; max-width: 100%; }
+.chart .mean { stroke: var(--muted); stroke-dasharray: 6 4; }
+.chart .point-label { fill: var(--ink); stroke: var(--card); stroke-width: 4px; paint-order: stroke; font-size: 12px; font-weight: 600; }
+.chart .prior-label { fill: var(--muted); }
+.chart .prior { opacity: .45; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 12px; padding: 4px 8px; border-radius: 6px; overflow-wrap: anywhere; transform: translate(-50%, -100%); display: none; max-width: calc(100% - 8px); z-index: 1; }
 .empty { color: var(--muted); font-size: 14px; padding: 18px 0; }
 .timeline { padding: 0; margin: 0; list-style: none; max-height: 340px; overflow-y: auto; }
 .timeline li { padding: 9px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
@@ -98,11 +102,13 @@ progress::-moz-progress-bar { background: var(--accent); }
     <progress id="progresso" max="100" value="0" aria-label="Progresso da sessão"></progress>
     <div class="controls">
       <label>Duração<select id="minutos"><option value="15">15 min</option><option value="30">30 min</option><option value="60" selected>60 min</option><option value="90">90 min</option><option value="120">120 min</option></select></label>
+      <label>Modo<select id="modo"><option value="completo" selected>Completo: SpO2 e estresse a cada ~3 min, batimento a cada ~1 min</option><option value="batimento">Batimento rápido: a cada ~5 s, sem SpO2/estresse</option></select></label>
       <button id="iniciar" disabled>Iniciar monitoramento</button>
       <button id="parar" class="ghost" hidden>Parar</button>
     </div>
     <p class="note">Durante a sessão o Bluetooth do celular deve ficar desligado e o relógio bem preso ao pulso.</p>
     <p id="status" role="status" aria-live="polite"></p>
+    <p class="note" id="ultima-sessao" hidden></p>
   </section>
   <div class="grid kpis section">
     <div class="card kpi"><h2>Batimento</h2><div class="v" id="k-bpm">–</div><div class="s" id="s-bpm">Sem leituras</div><div class="s age" id="a-bpm"></div></div>
@@ -133,20 +139,34 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const clock = s => { s = Math.max(0, Math.ceil(s)); return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; };
 const duration = s => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 3600)}h ${pad(Math.floor(s % 3600 / 60))}min ${pad(s % 60)}s`; };
-const fmtH = t => new Date(t * 1000).toLocaleTimeString('pt-BR');
+const fmtH = t => new Date(t * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const fmtHM = t => new Date(t * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false });
+const fmtDay = t => new Date(t * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
 const active = () => ['conectando', 'monitorando', 'restaurando'].includes(session.estado);
 const ended = () => ['concluido', 'erro'].includes(session.estado) || events.some(e => e.tipo === 'fim');
 const labels = { parado: 'Parado', conectando: 'Conectando', monitorando: 'Monitorando', restaurando: 'Restaurando sensores', concluido: 'Concluído', erro: 'Erro' };
 let session = { estado: 'parado' }, events = [], eventKeys = new Set();
 let ready = false, pending = false, stopping = false, syncing = null, buffer = [], frame = null, syncFailed = false;
 let stream = null, ages = {}, groups = {};
+const lastKnown = new Map();
 const eventKey = e => JSON.stringify(Object.keys(e).sort().map(k => [k, e[k]]));
-const eventTime = e => finite(e.t) ? e.t : (session.inicio || 0) + (finite(e.s) ? e.s : 0);
-const arrivalTime = e => (session.inicio || 0) + (finite(e.s) ? e.s : 0);
+const eventTime = e => finite(e.t) ? e.t : finite(session.inicio) && finite(e.s) ? session.inicio + e.s : NaN;
+const beforeSession = e => e.fonte === 'anterior' || (finite(session.inicio) && eventTime(e) < session.inicio);
+const inSession = (e, until = endTime()) => !beforeSession(e) && finite(session.inicio) && finite(eventTime(e)) && eventTime(e) <= until;
+const validReading = e => finite(eventTime(e)) && (e.tipo === 'passos' ? finite(e.total) : e.tipo === 'atividade' ? finite(e.passos) : ['bpm', 'spo2', 'estresse', 'bateria'].includes(e.tipo) && finite(e.valor));
+function remember(e) {
+  if (!validReading(e)) return;
+  const previous = lastKnown.get(e.tipo), t = eventTime(e);
+  if (!previous || t >= previous.t) lastKnown.set(e.tipo, { ...e, t });
+}
 function endTime() {
   if (finite(session.encerrado_em)) return session.encerrado_em;
   const last = events.findLast(e => e.tipo === 'fim');
-  return last ? arrivalTime(last) : now();
+  if (last && finite(eventTime(last))) return eventTime(last);
+  if (['concluido', 'erro'].includes(session.estado)) {
+    return events.reduce((t, e) => finite(eventTime(e)) && !beforeSession(e) ? Math.max(t, eventTime(e)) : t, session.inicio || 0);
+  }
+  return now();
 }
 function status(text = '', error = false) { $('#status').textContent = text; $('#status').className = error ? 'err' : ''; }
 async function api(path, body) {
@@ -177,19 +197,22 @@ function ingest(e, skipExisting = false) {
   }
   if (e.tipo === 'fim') {
     session.estado = session.erro || events.some(p => p.tipo === 'erro') ? 'erro' : 'concluido';
-    session.encerrado_em = arrivalTime(e);
+    session.encerrado_em = eventTime(e);
     stopping = false;
     status(session.estado === 'erro' ? 'Sessão encerrada com erro.' : 'Sessão concluída. Sensores restaurados.', session.estado === 'erro');
   }
+  remember(e);
 }
 function snapshot(data) {
   const changed = data.inicio !== session.inicio;
+  for (const e of events) remember(e);
   session = { ...data }; events = []; eventKeys = new Set();
   // Reconstrói o histórico sem repetir os efeitos dos eventos de controle.
   for (const e of data.eventos || []) {
     if (!e || typeof e !== 'object' || typeof e.tipo !== 'string') continue;
     const key = eventKey(e);
     eventKeys.add(key); events.push(e);
+    remember(e);
   }
   // Metadados do estado são autoritativos, inclusive durante a restauração.
   session = { ...data };
@@ -238,14 +261,14 @@ function connect() {
     } catch { status('O servidor enviou um evento inválido.', true); }
   };
 }
-function series(kind) {
+function series(kind, includePrevious = false) {
   const points = new Map(), until = endTime();
   for (const e of events) {
     if (e.tipo !== kind || !finite(e.valor)) continue;
     const t = eventTime(e);
     // Históricos anteriores ao início não pertencem às estatísticas da sessão.
-    if (!finite(t) || t < session.inicio || t > until) continue;
-    const key = `${t}:${e.valor}`;
+    if (!finite(t) || t > until || (!includePrevious && !inSession(e, until))) continue;
+    const key = `${t}:${e.valor}:${beforeSession(e)}`;
     if (!points.has(key)) points.set(key, [t, e.valor, e]);
   }
   return [...points.values()].sort((a, b) => a[0] - b[0]);
@@ -257,9 +280,14 @@ function stats(points) {
   return `${num(lo)} / ${num(sum / points.length)} / ${num(hi)}`;
 }
 function value(id, v, unit = '') { $(id).innerHTML = finite(v) ? `${esc(num(v))}${unit ? `<span>${esc(unit)}</span>` : ''}` : '–'; }
-function latest(kind) { return events.filter(e => e.tipo === kind).sort((a, b) => eventTime(a) - eventTime(b)).at(-1); }
+function latest(kind, sessionOnly = false) {
+  const found = events.filter(e => e.tipo === kind && validReading(e) && (!sessionOnly || inSession(e))).sort((a, b) => eventTime(a) - eventTime(b)).at(-1);
+  if (found || sessionOnly) return found;
+  const cached = lastKnown.get(kind);
+  return cached ? { ...cached, fonte: 'anterior' } : undefined;
+}
 function batteryDrop() {
-  const b = events.filter(e => e.tipo === 'bateria' && finite(e.valor)).sort((a, b) => eventTime(a) - eventTime(b));
+  const b = events.filter(e => e.tipo === 'bateria' && finite(e.valor) && inSession(e)).sort((a, b) => eventTime(a) - eventTime(b));
   if (b.length < 2) return null;
   const hours = (eventTime(b.at(-1)) - eventTime(b[0])) / 3600, drop = b[0].valor - b.at(-1).valor;
   return { drop, rate: hours > 0 ? drop / hours : null };
@@ -270,101 +298,155 @@ function updateClock() {
   const left = ended() ? 0 : Math.max(0, total - elapsed);
   $('#relogio').textContent = clock(left);
   $('#progresso').value = Math.min(100, elapsed / total * 100);
-  for (const [kind, t] of Object.entries(ages)) $('#a-' + kind).textContent = `há ${Math.max(0, Math.floor(now() - t))} s`;
+  for (const [kind, e] of Object.entries(ages)) {
+    const t = eventTime(e);
+    $('#a-' + kind).textContent = `${beforeSession(e) ? 'antes da sessão · ' : ''}medido às ${fmtH(t)} · há ${Math.max(0, Math.floor(now() - t))} s`;
+  }
 }
 function renderControls() {
   $('#estado').textContent = labels[session.estado] || 'Estado desconhecido';
   $('#estado').className = 'pill' + (session.estado === 'erro' ? ' err' : active() ? ' on' : '');
   $('#iniciar').disabled = !ready || pending || active();
-  $('#minutos').disabled = pending || active();
+  $('#minutos').disabled = pending || active(); $('#modo').disabled = pending || active();
   $('#parar').hidden = !active();
   $('#parar').disabled = pending || stopping || session.estado === 'restaurando';
   $('#parar').textContent = stopping ? 'Parando…' : 'Parar';
+  const lastSession = $('#ultima-sessao'), showLast = ended() && finite(session.inicio);
+  lastSession.hidden = !showLast;
+  if (showLast) {
+    const start = session.inicio, end = endTime();
+    const sameDay = new Date(start * 1000).toDateString() === new Date(end * 1000).toDateString();
+    lastSession.textContent = `Última sessão: ${fmtHM(start)}${sameDay ? '' : ` de ${fmtDay(start)}`}–${fmtHM(end)} de ${fmtDay(end)}`;
+  }
 }
 function renderKpis() {
   ages = {};
   for (const [kind, unit] of [['bpm', 'bpm'], ['spo2', '%'], ['estresse', '/100']]) {
-    const pts = groups[kind], last = pts.at(-1);
-    value('#k-' + kind, last?.[1], unit);
-    $('#s-' + kind).textContent = last ? `Mín / méd / máx: ${stats(pts)}` : 'Sem leituras na sessão';
+    const pts = groups[kind], last = latest(kind);
+    value('#k-' + kind, last?.valor, unit);
+    $('#s-' + kind).textContent = pts.length ? `Mín / méd / máx: ${stats(pts)}` : last ? 'Última leitura conhecida' : 'Sem leituras na sessão';
     $('#a-' + kind).textContent = '';
-    if (last) ages[kind] = last[0];
+    if (last) ages[kind] = last;
   }
   const steps = latest('passos'), battery = latest('bateria'), activity = latest('atividade'), drop = batteryDrop();
   value('#k-passos', steps?.total);
   $('#s-passos').textContent = steps ? `${num(steps.kcal)} kcal · ${num(steps.metros)} metros` : 'Sem leituras';
   $('#a-passos').textContent = '';
-  if (steps) ages.passos = eventTime(steps);
+  if (steps) ages.passos = steps;
   $('#atividade').textContent = activity ? `Total do dia: ${num(activity.passos)} passos · ${num(activity.kcal)} kcal · ${num(activity.metros)} m` : '';
   value('#k-bateria', battery?.valor, '%');
   $('#s-bateria').textContent = battery ? `${drop ? (drop.drop < 0 ? `Subiu ${num(-drop.drop)}%` : `Caiu ${num(drop.drop)}%`) : 'Aguardando nova leitura para comparar'}${battery.carregando ? ' · carregando' : ''}` : 'Sem leituras';
   $('#a-bateria').textContent = '';
-  if (battery) ages.bateria = eventTime(battery);
+  if (battery) ages.bateria = battery;
 }
-/* Gráfico SVG genérico do painel, com eixo x em tempo decorrido e dica por ponteiro. */
+/* Horário local, lacunas de coleta e leituras anteriores à sessão. */
 function chart(el, o) {
-  const W = el.clientWidth || 600, H = o.h, L = o.left ?? 40, R = 12, T = 10, B = 26;
+  const W = el.clientWidth || 600, H = 220, L = 44, R = 18, T = 30, B = 30;
   const w = W - L - R, h = H - T - B, span = Math.max(1, o.t1 - o.t0);
-  const yMin = o.yMin ?? 0, yMax = o.yMax ?? 1;
   const x = t => L + (t - o.t0) / span * w;
-  const y = v => T + h - (v - yMin) / (yMax - yMin) * h;
+  const y = v => T + h - (v - o.yMin) / (o.yMax - o.yMin) * h;
   let s = '';
-  for (const v of o.yTicks || []) s += `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${esc(num(v))}</text>`;
-  const ticks = Math.max(1, Math.floor(w / 85));
-  for (let i = 0; i <= ticks; i++) {
-    const t = o.t0 + span * i / ticks;
-    s += `<text class="ax" x="${x(t)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}">${clock(t - o.t0)}</text>`;
+  for (const v of o.yTicks) s += `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${esc(num(v))}</text>`;
+  const step = (span <= 30 * 60 ? 5 : span <= 90 * 60 ? 10 : 15) * 60;
+  const labelEvery = Math.max(1, Math.ceil(56 / (step / span * w)));
+  for (let t = Math.ceil(o.t0 / step) * step, i = 0; t <= o.t1; t += step, i++) {
+    const px = x(t);
+    s += `<line class="grid-l" x1="${px}" x2="${px}" y1="${T + h}" y2="${T + h + 5}"/>`;
+    // Mantém todas as marcas, espaçando os rótulos em telas estreitas.
+    if (i % labelEvery === 0 && px - L >= 54 && W - R - px >= 54) s += `<text class="ax" x="${px}" y="${H - 7}" text-anchor="middle">${esc(fmtHM(t))}</text>`;
   }
-  s += `<svg x="${L}" y="${T}" width="${w}" height="${h}" viewBox="${L} ${T} ${w} ${h}" overflow="hidden">${o.body({ x, y, T, h, L, W, R })}</svg>`;
-  el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(o.label)}">${s}<line class="guide" y1="${T}" y2="${T + h}" style="display:none"/></svg><div class="tip"></div>`;
-  if (!o.hover) return;
-  const svg = el.querySelector('svg'), tip = el.querySelector('.tip'), guide = el.querySelector('.guide');
-  svg.addEventListener('pointermove', e => {
-    const px = e.clientX - svg.getBoundingClientRect().left;
-    const hit = px >= L && px <= W - R ? o.hover(o.t0 + (px - L) / w * span) : null;
-    if (!hit) { tip.style.display = guide.style.display = 'none'; return; }
-    const gx = x(hit.t);
+  s += `<text class="ax" x="${L}" y="${H - 7}">${esc(fmtHM(o.t0))}</text><text class="ax" x="${W - R}" y="${H - 7}" text-anchor="end">${esc(fmtHM(o.t1))}</text>`;
+  if (o.pts.some(([, , e]) => beforeSession(e))) {
+    s += '<text class="ax" x="44" y="15">Esmaecidos: antes da sessão</text>';
+    if (finite(session.inicio) && session.inicio >= o.t0 && session.inicio <= o.t1) s += `<line class="guide" x1="${x(session.inicio)}" x2="${x(session.inicio)}" y1="${T}" y2="${T + h}"/><text class="ax" x="${x(session.inicio)}" y="${H - 17}" text-anchor="${x(session.inicio) > W - R - 20 ? 'end' : 'start'}">início</text>`;
+  }
+  if (finite(o.mean)) s += `<line class="mean" x1="${L}" x2="${W - R}" y1="${y(o.mean)}" y2="${y(o.mean)}"/>`;
+  const paths = { prior: '', current: '' }, sparse = o.kind !== 'bpm' && o.pts.length <= 3;
+  const meanY = finite(o.mean) ? Math.max(T + 12, y(o.mean) - 7) : null;
+  const labelBoxes = finite(o.mean) ? [{ left: W - R - 12 - (`média ${num(o.mean)}`).length * 7, right: W - R, top: meanY - 13, bottom: meanY + 3 }] : [];
+  for (let i = 0; i < o.pts.length; i++) {
+    const [t, v, e] = o.pts[i], previous = o.pts[i - 1], prior = beforeSession(e);
+    const connect = previous && t - previous[0] <= 180 && prior === beforeSession(previous[2]);
+    paths[prior ? 'prior' : 'current'] += `${connect ? 'L' : 'M'}${x(t).toFixed(2)},${y(v).toFixed(2)} `;
+  }
+  for (const [type, path] of Object.entries(paths)) s += `<path${type === 'prior' ? ' class="prior"' : ''} d="${path}" fill="none" stroke="${esc(o.color)}" stroke-width="2" stroke-linejoin="round"/>`;
+  for (const [t, v, e] of o.pts) {
+    const px = x(t), py = y(v), prior = beforeSession(e);
+    s += `<g><circle${prior ? ' class="prior"' : ''} cx="${px}" cy="${py}" r="${sparse ? 5 : 3}" fill="${esc(o.color)}" stroke="var(--card)" stroke-width="1"/>`;
+    if (sparse) {
+      const right = px > W - R - 42, labelX = px + (right ? -9 : 9), labelWidth = num(v).length * 7;
+      let labelY = Math.max(T + 12, py - 10), box;
+      for (const offset of [-10, 22, -28, 40, -46, 58]) {
+        labelY = Math.min(T + h - 2, Math.max(T + 12, py + offset));
+        box = { left: right ? labelX - labelWidth : labelX, right: right ? labelX : labelX + labelWidth, top: labelY - 13, bottom: labelY + 3 };
+        if (!labelBoxes.some(b => box.left < b.right + 4 && box.right + 4 > b.left && box.top < b.bottom + 4 && box.bottom + 4 > b.top)) break;
+      }
+      labelBoxes.push(box);
+      s += `<text class="point-label${prior ? ' prior-label' : ''}" x="${labelX}" y="${labelY}" text-anchor="${right ? 'end' : 'start'}">${esc(num(v))}</text>`;
+    }
+    s += '</g>';
+  }
+  if (finite(o.mean)) s += `<text class="point-label" x="${W - R - 4}" y="${meanY}" text-anchor="end">média ${esc(num(o.mean))}</text>`;
+  el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.label)}">${s}<line class="guide hover-guide" y1="${T}" y2="${T + h}" style="display:none"/></svg><div class="tip" role="status"></div>`;
+  const svg = el.querySelector('svg'), tip = el.querySelector('.tip'), guide = el.querySelector('.hover-guide');
+  const hide = () => { tip.style.display = guide.style.display = 'none'; };
+  const show = e => {
+    const rect = svg.getBoundingClientRect(), px = (e.clientX - rect.left) * W / rect.width, py = (e.clientY - rect.top) * H / rect.height;
+    if (px < L - 8 || px > W - R + 8 || py < T - 8 || py > T + h + 8) { hide(); return; }
+    let best = o.pts[0], distance = Infinity;
+    for (const point of o.pts) {
+      const d = (x(point[0]) - px) ** 2 + (y(point[1]) - py) ** 2;
+      if (d < distance) { best = point; distance = d; }
+    }
+    const [t, v, reading] = best, gx = x(t);
     guide.setAttribute('x1', gx); guide.setAttribute('x2', gx); guide.style.display = '';
-    tip.textContent = hit.text; tip.style.display = 'block';
-    const half = Math.min(W / 2, tip.offsetWidth / 2 + 2);
-    tip.style.left = Math.min(Math.max(gx, half), W - half) + 'px'; tip.style.top = (hit.y ?? T) + 'px';
-  });
-  svg.addEventListener('pointerleave', () => { tip.style.display = guide.style.display = 'none'; });
+    tip.textContent = `${fmtH(t)} · ${num(v)} ${o.unit}${reading.fonte ? ` (${reading.fonte})` : ''}${beforeSession(reading) ? ' · antes da sessão' : ''}`;
+    tip.style.display = 'block';
+    const half = Math.min(W / 2, tip.offsetWidth / 2 + 4);
+    tip.style.left = Math.min(Math.max(gx, half), W - half) + 'px';
+    tip.style.top = Math.max(tip.offsetHeight + 4, y(v) - 10) + 'px';
+  };
+  svg.addEventListener('pointermove', show);
+  svg.addEventListener('pointerdown', show);
+  svg.addEventListener('pointerup', e => { if (e.pointerType === 'touch') show(e); });
+  svg.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') hide(); });
+  svg.addEventListener('pointercancel', hide);
 }
 function renderCharts() {
   for (const [kind, color, unit, fixedMin, fixedMax] of [['bpm', '--hr', 'bpm'], ['spo2', '--spo2', '%', 90, 100], ['estresse', '--stress', '/100', 0, 100]]) {
-    const el = $('#c-' + kind), pts = groups[kind];
-    if (!pts.length) { el.innerHTML = '<div class="empty">Aguardando leituras na sessão.</div>'; continue; }
+    const el = $('#c-' + kind), pts = series(kind, true), current = groups[kind];
+    if (!pts.length) { el.innerHTML = '<div class="empty">Aguardando leituras.</div>'; continue; }
     let lo = Infinity, hi = -Infinity;
     for (const [, v] of pts) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-    const yMin = fixedMin ?? Math.max(0, Math.floor((lo - 10) / 10) * 10), yMax = fixedMax ?? Math.ceil((hi + 10) / 10) * 10;
+    const low = Math.min(lo, fixedMin ?? Math.max(0, lo - 10)), high = Math.max(hi, fixedMax ?? hi + 10);
+    const rough = Math.max(1, (high - low) / 3), power = 10 ** Math.floor(Math.log10(rough));
+    const step = [1, 2, 5, 10].find(n => n * power >= rough) * power;
+    const yMin = Math.floor(low / step) * step, yMax = Math.ceil(high / step) * step, yTicks = [];
+    for (let v = yMin; v <= yMax + step / 100; v += step) yTicks.push(v);
+    const start = finite(session.inicio) ? session.inicio : pts[0][0];
     chart(el, {
-      t0: session.inicio, t1: Math.max(session.fim_previsto || session.inicio + 1, pts.at(-1)[0]), h: 200,
-      yMin, yMax, yTicks: [yMin, (yMin + yMax) / 2, yMax], label: `${kind}: leituras por tempo da sessão`,
-      body: ({ x, y }) => `<polyline points="${pts.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' ')}" fill="none" stroke="${css(color)}" stroke-width="2" stroke-linejoin="round"/>` + pts.map(([t, v]) => `<circle cx="${x(t)}" cy="${y(v)}" r="2" fill="${css(color)}"/>`).join(''),
-      hover: t => {
-        let best = pts[0];
-        for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
-        return { t: best[0], text: `${clock(best[0] - session.inicio)} · ${num(best[1])} ${unit}` };
-      },
+      kind, pts, color: css(color), unit,
+      t0: Math.min(start, pts[0][0]), t1: Math.max(start + 60, (ended() ? endTime() : session.fim_previsto) || now(), pts.at(-1)[0]),
+      yMin, yMax, yTicks, mean: current.length ? current.reduce((sum, p) => sum + p[1], 0) / current.length : null,
+      label: `${kind}: medições por horário local; pontos esmaecidos são anteriores à sessão`,
     });
   }
 }
 function renderTimeline() {
-  const list = events.filter(e => e.tipo === 'aviso' || e.tipo === 'erro').sort((a, b) => arrivalTime(b) - arrivalTime(a));
-  $('#avisos').innerHTML = list.length ? list.map(e => `<li${e.tipo === 'erro' ? ' class="err"' : ''}><time>${esc(fmtH(arrivalTime(e)))}</time>${e.tipo === 'erro' ? 'Erro: ' : ''}${esc(e.texto)}</li>`).join('') : '<li class="empty">Nenhum aviso registrado.</li>';
+  const list = events.filter(e => e.tipo === 'aviso' || e.tipo === 'erro').sort((a, b) => eventTime(b) - eventTime(a));
+  $('#avisos').innerHTML = list.length ? list.map(e => `<li${e.tipo === 'erro' ? ' class="err"' : ''}><time>${esc(finite(eventTime(e)) ? fmtH(eventTime(e)) : 'Horário indisponível')}</time>${e.tipo === 'erro' ? 'Erro: ' : ''}${esc(e.texto)}</li>`).join('') : '<li class="empty">Nenhum aviso registrado.</li>';
 }
 function renderReport() {
   $('#relatorio').hidden = !ended();
   if (!ended()) return;
-  const seconds = Math.max(0, endTime() - session.inicio), steps = latest('passos'), drop = batteryDrop();
+  const seconds = finite(session.inicio) ? Math.max(0, endTime() - session.inicio) : 0, steps = latest('passos', true), drop = batteryDrop();
   const zones = [0, 0, 0], pts = groups.bpm;
   for (let i = 0; i < pts.length; i++) {
     const [t, v] = pts[i], next = Math.min(endTime(), pts[i + 1]?.[0] ?? endTime());
     zones[v < 100 ? 0 : v <= 140 ? 1 : 2] += Math.max(0, next - t);
   }
   const block = (title, rows) => `<div><h3>${esc(title)}</h3><dl class="defs">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></div>`;
-  const rawCount = kind => events.filter(e => e.tipo === kind).length;
+  const rawCount = kind => events.filter(e => e.tipo === kind && inSession(e)).length;
   let html = block('Resumo', [['Duração real', duration(seconds)], ['Passos', num(steps?.total)], ['Energia', `${num(steps?.kcal)} kcal`], ['Distância', `${num(steps?.metros)} metros`], ['Consumo de bateria', drop ? `${num(drop.drop)}%` : 'Sem leituras suficientes'], ['Consumo por hora', drop && finite(drop.rate) ? `${num(drop.rate)}%/hora` : 'Sem intervalo suficiente']]);
   for (const [kind, label, unit] of [['bpm', 'Batimento', 'bpm'], ['spo2', 'SpO2', '%'], ['estresse', 'Estresse', '/100']]) html += block(label, [['Leituras únicas', num(groups[kind].length)], ['Eventos recebidos', num(rawCount(kind))], ['Mín / méd / máx', `${stats(groups[kind])} ${unit}`]]);
   html += block('Outras leituras', [['Passos da sessão', num(rawCount('passos'))], ['Bateria', num(rawCount('bateria'))], ['Atividade do dia', num(rawCount('atividade'))]]);
@@ -384,7 +466,7 @@ $('#iniciar').onclick = async () => {
   try {
     // Aguarda qualquer consulta anterior antes de substituir a sessão.
     if (syncing) await syncing;
-    const data = await api('iniciar', { minutos: Number($('#minutos').value) });
+    const data = await api('iniciar', { minutos: Number($('#minutos').value), modo: $('#modo').value });
     snapshot(data); status('Preparando a conexão com o relógio…');
     await syncState();
   } catch (e) { await syncState(); status(`Não foi possível iniciar: ${e.message}`, true); }
