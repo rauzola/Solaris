@@ -43,7 +43,9 @@ SWITCHES = [
     "Lembrete de sedentarismo", "Economia de energia", "Repetir aviso", "Som de aviso", "Levantar o pulso acende a tela",
     "Aviso de meta atingida", "Batimento em tempo real", "Super alarme", "Monitor de batimento", "Sensor de 3 eixos",
     "Vibração ao girar", "Monitor de cansaço (estresse)", "Vibração ao tocar", "Toque duplo para voltar",
-    "Tela sempre ligada", "Modo esporte", "Monitor de estresse", "Aviso de movimento", "Tela desligada com dados",
+    # 24 (ScreenAlwaysOn) é guardado mas não faz nada no LS23; a tela sempre ligada de verdade é o 28 (OffScreenDisplay)
+    "Tela sem apagar (sem efeito no LS23)", "Modo esporte", "Monitor de estresse", "Aviso de movimento",
+    "Tela sempre ligada (AOD)",
     "SpO2 contínuo",
 ]
 
